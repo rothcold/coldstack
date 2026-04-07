@@ -1,3 +1,5 @@
+@import './variables.css';
+
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
@@ -25,27 +27,34 @@ a:hover {
 body {
   margin: 0;
   display: flex;
-  place-items: center;
+  place-items: flex-start;
+  justify-content: center;
   min-width: 320px;
   min-height: 100vh;
+  font-family: var(--font-sans);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+* {
+  box-sizing: border-box;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text-primary);
 }
 
 button {
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid transparent;
   padding: 0.6em 1.2em;
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
   cursor: pointer;
   transition: border-color 0.25s;
 }
+
 button:hover {
   border-color: #646cff;
 }

@@ -1,0 +1,71 @@
+:root {
+  /* Colors */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f9fafb;
+  --bg-tertiary: #f3f4f6;
+  
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-tertiary: #9ca3af;
+
+  --accent-primary: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-light: #eff6ff;
+
+  --border-color: #e5e7eb;
+  --border-color-focus: #c7d2fe;
+
+  /* Status Colors */
+  --status-idle: #9ca3af;
+  --status-idle-bg: #f3f4f6;
+  --status-working: #10b981;
+  --status-working-bg: #d1fae5;
+  --status-offline: #ef4444;
+  --status-offline-bg: #fee2e2;
+
+  --status-pending: #6b7280;
+  --status-doing: #3b82f6;
+  --status-reviewing: #8b5cf6;
+  --status-done: #10b981;
+
+  /* Terminal Colors */
+  --terminal-bg: #1e1e1e;
+  --terminal-text: #d4d4d4;
+  --terminal-border: #333333;
+
+  /* Spacing Scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* Border Radius */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary: #111827;
+    --bg-secondary: #1f2937;
+    --bg-tertiary: #374151;
+    
+    --text-primary: #f9fafb;
+    --text-secondary: #d1d5db;
+    --text-tertiary: #9ca3af;
+
+    --border-color: #374151;
+    --border-color-focus: #4b5563;
+
+    --accent-light: #1e3a8a;
+  }
+}
