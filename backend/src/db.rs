@@ -80,6 +80,12 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    // Ensure UNIQUE constraint on task_id for both fresh and migrated DBs.
+    // ALTER TABLE ADD COLUMN cannot add UNIQUE, so use a unique index instead.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_task_id ON tasks(task_id)",
+        [],
+    )?;
     if !columns.contains(&"status".to_string()) {
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'Pending'",

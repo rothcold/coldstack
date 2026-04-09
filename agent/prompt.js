@@ -8,7 +8,7 @@ export function buildSystemPrompt(task, agent) {
     : "";
 
   return `You are an AI agent "${agent.name}" working in: ${agent.work_dir || "."}
-You have MCP tools for the task-manager server. Use them to track your progress.
+You have MCP tools for the coldstack server. Use them to track your progress.
 
 ${roleBlock}## Task
 - ID: ${task.id} | Task ID: ${task.task_id}

@@ -1,6 +1,6 @@
-# Skill: Task Manager Integration
+# Skill: Coldstack Integration
 
-Expert guidance for AI agents to interact with the Task Manager API to manage tasks, subtasks, statuses, and assignees.
+Expert guidance for AI agents to interact with the Coldstack API to manage tasks, subtasks, statuses, and assignees.
 
 ## API Specification
 

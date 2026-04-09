@@ -21,7 +21,7 @@ cargo build --release
 
 echo "Step 3: Packaging..."
 mkdir -p "$DIST_DIR"
-cp "$BACKEND_DIR/target/release/task-manager-backend" "$DIST_DIR/task-manager"
+cp "$BACKEND_DIR/target/release/coldstack" "$DIST_DIR/coldstack"
 
-echo "Success! Your single binary is located at: $DIST_DIR/task-manager"
-echo "You can now run it with: ./release/task-manager"
+echo "Success! Your single binary is located at: $DIST_DIR/coldstack"
+echo "You can now run it with: ./release/coldstack"

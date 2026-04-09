@@ -1,7 +1,11 @@
 [package]
-name = "task-manager-backend"
+name = "coldstack-server"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "coldstack"
+path = "src/main.rs"
 
 [dependencies]
 actix-web = "4"

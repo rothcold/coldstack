@@ -6,11 +6,11 @@ import { executeClaude, executeGemini, setupGeminiMcp } from "./executor.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // --- Config ---
-const BASE = process.env.TASK_MANAGER_URL || "http://127.0.0.1:8080";
+const BASE = process.env.COLDSTACK_URL || "http://127.0.0.1:8080";
 const POLL_INTERVAL = Number(process.env.POLL_INTERVAL_MS) || 5000;
 const MCP_SERVER_PATH = resolve(__dirname, process.env.MCP_SERVER_PATH || "../mcp/index.js");
 
-const config = { taskManagerUrl: BASE, mcpServerPath: MCP_SERVER_PATH };
+const config = { coldstackUrl: BASE, mcpServerPath: MCP_SERVER_PATH };
 
 // --- Logging ---
 function log(agent, msg, level = "INFO") {
@@ -139,7 +139,7 @@ let shuttingDown = false;
 let pollTimer;
 
 async function main() {
-  console.error(`Task Manager Agent Runner`);
+  console.error(`Coldstack Agent Runner`);
   console.error(`API: ${BASE} | Poll interval: ${POLL_INTERVAL}ms`);
   console.error(`MCP server: ${MCP_SERVER_PATH}\n`);
 

@@ -27,7 +27,7 @@ RUN mkdir -p frontend/dist && touch frontend/dist/.keep
 RUN mkdir -p backend/src && echo 'fn main() {}' > backend/src/main.rs
 WORKDIR /build/backend
 RUN cargo build --release || true
-RUN rm -rf src target/release/.fingerprint/task-manager-backend-*
+RUN rm -rf src target/release/.fingerprint/coldstack-server-*
 
 # Now build for real
 WORKDIR /build
@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/backend/target/release/task-manager-backend /usr/local/bin/task-manager
+COPY --from=builder /build/backend/target/release/coldstack /usr/local/bin/coldstack
 
 # tasks.db is created at startup in the working directory.
 # Mount a volume here so the database survives container restarts.
@@ -50,4 +50,4 @@ WORKDIR /data
 VOLUME ["/data"]
 
 EXPOSE 8080
-CMD ["task-manager"]
+CMD ["coldstack"]

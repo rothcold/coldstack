@@ -381,6 +381,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "coldstack-server"
+version = "0.1.0"
+dependencies = [
+ "actix-cors",
+ "actix-web",
+ "async-trait",
+ "chrono",
+ "futures-core",
+ "mime_guess",
+ "r2d2",
+ "r2d2_sqlite",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1498,26 +1518,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "task-manager-backend"
-version = "0.1.0"
-dependencies = [
- "actix-cors",
- "actix-web",
- "async-trait",
- "chrono",
- "futures-core",
- "mime_guess",
- "r2d2",
- "r2d2_sqlite",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

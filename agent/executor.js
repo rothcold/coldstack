@@ -44,10 +44,10 @@ export async function executeClaude(systemPrompt, taskPrompt, agent, config) {
   const mcpPath = resolve(__dirname, config.mcpServerPath);
   const mcpConfig = JSON.stringify({
     mcpServers: {
-      "task-manager": {
+      "coldstack": {
         command: "node",
         args: [mcpPath],
-        env: { TASK_MANAGER_URL: config.taskManagerUrl },
+        env: { COLDSTACK_URL: config.coldstackUrl },
       },
     },
   });
@@ -75,7 +75,7 @@ export async function executeGemini(systemPrompt, taskPrompt, agent, config) {
 export async function setupGeminiMcp(config) {
   const mcpPath = resolve(__dirname, config.mcpServerPath);
   try {
-    await spawnAsync("gemini", ["mcp", "add", "task-manager", "--", "node", mcpPath], {
+    await spawnAsync("gemini", ["mcp", "add", "coldstack", "--", "node", mcpPath], {
       timeoutMs: 15_000,
     });
     return true;

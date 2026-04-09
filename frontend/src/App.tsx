@@ -16,7 +16,7 @@ function App() {
           alignItems: 'center'
         }}>
           <div style={{ fontWeight: 'bold', fontSize: '1.25rem', color: 'var(--text-primary)' }}>
-            Agent Task Manager
+            Coldstack
           </div>
           <nav style={{ display: 'flex', gap: '1rem' }}>
             <NavLink 

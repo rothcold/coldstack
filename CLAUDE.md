@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Project name:** Coldstack — a self-hosted single-binary AI employee dashboard. The backend crate is `coldstack-server`, the frontend package is `coldstack-web`, the built single binary is `coldstack`.
+
 ## Commands
 
 ### Frontend (`/frontend`)
@@ -25,7 +27,7 @@ cargo run            # Run server (http://127.0.0.1:8080)
 ### Full Build (single binary)
 
 ```bash
-./build_and_package.sh  # Builds frontend, then backend embeds frontend/dist/, outputs to release/task-manager
+./build_and_package.sh  # Builds frontend, then backend embeds frontend/dist/, outputs to release/coldstack
 ```
 
 > The frontend **must** be built before the backend when doing a full build, because rust-embed compiles `frontend/dist/` into the binary at compile time.
@@ -57,7 +59,7 @@ This is a **single-binary full-stack app**: the Rust backend embeds the compiled
 
 ## API Reference
 
-See `TASK_MANAGER_SKILL.md` for the full API spec used by AI agent integrations. Key points:
+See `COLDSTACK_SKILL.md` for the full API spec used by AI agent integrations. Key points:
 
 - `{id}` in task routes refers to the **internal integer `id`**, not `task_id`
 - `task_id` must be unique; POST returns `409 Conflict` if already exists

@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const BASE_URL = process.env.TASK_MANAGER_URL || "http://127.0.0.1:8080";
+const BASE_URL = process.env.COLDSTACK_URL || "http://127.0.0.1:8080";
 
 async function api(path, options = {}) {
   const res = await fetch(`${BASE_URL}/api${path}`, {
@@ -25,7 +25,7 @@ function text(data) {
 const TaskStatus = z.enum(["Pending", "Doing", "Finished", "Reviewing", "Done"]);
 
 const server = new McpServer({
-  name: "task-manager",
+  name: "coldstack",
   version: "1.0.0",
 });
 

@@ -1,2 +1,4 @@
 release/
+.gstack/
+task.db
 
