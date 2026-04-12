@@ -12,21 +12,19 @@ pub struct TaskInfo {
 }
 
 pub struct EmployeeConfig {
-    pub name: String,
-    pub role: String,
     pub system_prompt: Option<String>,
 }
 
 pub struct AgentProcess {
     pub child: Child,
     pub stdout: BufReader<tokio::process::ChildStdout>,
+    pub stderr: BufReader<tokio::process::ChildStderr>,
 }
 
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     async fn execute(&self, task: &TaskInfo, employee: &EmployeeConfig) -> Result<AgentProcess, String>;
     fn is_available(&self) -> bool;
-    fn backend_name(&self) -> &str;
 }
 
 pub struct AdapterRegistry {

@@ -3,9 +3,10 @@ mod db;
 mod errors;
 mod handlers;
 mod models;
+mod workflow;
 
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use actix_cors::Cors;
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -42,8 +43,13 @@ fn configure_api_routes(cfg: &mut web::ServiceConfig) {
         web::scope("/api")
             .route("/tasks", web::get().to(handlers::tasks::get_tasks))
             .route("/tasks", web::post().to(handlers::tasks::create_task))
+            .route("/tasks/{id}", web::get().to(handlers::tasks::get_task_detail))
             .route("/tasks/{id}", web::put().to(handlers::tasks::update_task))
             .route("/tasks/{id}", web::delete().to(handlers::tasks::delete_task))
+            .route(
+                "/tasks/{id}/transition",
+                web::post().to(handlers::tasks::transition_task),
+            )
             .route(
                 "/tasks/{id}/subtasks",
                 web::post().to(handlers::tasks::add_subtask),
@@ -77,6 +83,10 @@ fn configure_api_routes(cfg: &mut web::ServiceConfig) {
                 web::get().to(handlers::employees::get_executions),
             )
             .route(
+                "/employees/{id}/current_execution",
+                web::get().to(handlers::employees::get_current_execution),
+            )
+            .route(
                 "/executions/{id}/cancel",
                 web::post().to(handlers::employees::cancel_execution),
             )
@@ -95,7 +105,7 @@ fn configure_api_routes(cfg: &mut web::ServiceConfig) {
 mod tests {
     use super::*;
     use actix_web::{test, web, App};
-    use rusqlite::params;
+    use rusqlite::Connection;
 
     fn setup_pool() -> db::DbPool {
         let pool = db::create_memory_pool().expect("Failed to create test pool");
@@ -119,118 +129,99 @@ mod tests {
         };
     }
 
-    mod unit {
-        use super::super::models::TaskStatus;
+    #[::core::prelude::v1::test]
+    fn test_init_db_creates_workflow_columns() {
+        let pool = setup_pool();
+        let conn = pool.get().unwrap();
 
-        #[test]
-        fn test_task_status_from_str_defaults_to_pending() {
-            assert_eq!(TaskStatus::from_str("unknown"), TaskStatus::Pending);
-            assert_eq!(TaskStatus::from_str(""), TaskStatus::Pending);
-        }
+        let mut stmt = conn.prepare("PRAGMA table_info(tasks)").unwrap();
+        let task_cols: Vec<String> = stmt
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(task_cols.contains(&"archived".to_string()));
+        assert!(task_cols.contains(&"status".to_string()));
 
-        #[test]
-        fn test_task_status_roundtrip() {
-            for status in [
-                TaskStatus::Pending,
-                TaskStatus::Doing,
-                TaskStatus::Finished,
-                TaskStatus::Reviewing,
-                TaskStatus::Done,
-            ] {
-                assert_eq!(TaskStatus::from_str(status.as_str()), status);
-            }
-        }
+        let mut stmt = conn.prepare("PRAGMA table_info(ai_employees)").unwrap();
+        let employee_cols: Vec<String> = stmt
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(employee_cols.contains(&"workflow_role".to_string()));
+    }
 
-        #[test]
-        fn test_init_db_creates_tables() {
-            let pool = super::setup_pool();
-            let conn = pool.get().unwrap();
-            let task_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(task_count, 0);
-            let sub_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM subtasks", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(sub_count, 0);
-        }
-
-        #[test]
-        fn test_init_db_creates_correct_columns() {
-            let pool = super::setup_pool();
-            let conn = pool.get().unwrap();
-
-            let mut stmt = conn.prepare("PRAGMA table_info(tasks)").unwrap();
-            let cols: Vec<String> = stmt
-                .query_map([], |r| r.get(1))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect();
-            for expected in [
-                "id",
-                "task_id",
-                "title",
-                "description",
-                "completed",
-                "status",
-                "assignee",
-                "created_at",
-            ] {
-                assert!(
-                    cols.contains(&expected.to_string()),
-                    "tasks missing column: {}",
-                    expected
-                );
-            }
-
-            let mut stmt = conn.prepare("PRAGMA table_info(subtasks)").unwrap();
-            let cols: Vec<String> = stmt
-                .query_map([], |r| r.get(1))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect();
-            for expected in ["id", "task_id", "title", "completed", "status", "assignee"] {
-                assert!(
-                    cols.contains(&expected.to_string()),
-                    "subtasks missing column: {}",
-                    expected
-                );
-            }
-        }
-
-        #[test]
-        fn test_init_db_enables_foreign_keys() {
-            let pool = super::setup_pool();
-            let conn = pool.get().unwrap();
-            let fk_enabled: i64 = conn
-                .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(fk_enabled, 1);
-        }
-
-        #[test]
-        fn test_init_db_is_idempotent() {
-            let pool = super::setup_pool();
-            let conn = pool.get().unwrap();
-            super::super::db::init_db(&conn).unwrap();
+    #[::core::prelude::v1::test]
+    fn test_workflow_status_roundtrip() {
+        for status in [
+            models::WorkflowStatus::Plan,
+            models::WorkflowStatus::Design,
+            models::WorkflowStatus::Coding,
+            models::WorkflowStatus::Review,
+            models::WorkflowStatus::QA,
+            models::WorkflowStatus::NeedsHuman,
+            models::WorkflowStatus::Done,
+        ] {
+            assert_eq!(models::WorkflowStatus::from_str(status.as_str()), status);
         }
     }
 
-    #[actix_web::test]
-    async fn test_get_tasks_returns_empty_list() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
+    #[::core::prelude::v1::test]
+    fn test_init_db_migrates_completed_to_archived() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                completed INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                assignee TEXT,
+                created_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (task_id, title, description, completed, status, created_at) VALUES ('T-OLD', 'Legacy', '', 1, 'Doing', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
 
-        let req = test::TestRequest::get().uri("/api/tasks").to_request();
-        let resp = test::call_service(&app, req).await;
+        db::init_db(&conn).unwrap();
 
-        assert_eq!(resp.status(), 200);
-        let body: Vec<serde_json::Value> = test::read_body_json(resp).await;
-        assert!(body.is_empty());
+        let (archived, status): (i32, String) = conn
+            .query_row(
+                "SELECT archived, status FROM tasks WHERE task_id = 'T-OLD'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(archived, 1);
+        assert_eq!(status, "Coding");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_seed_employees_uses_supported_backend() {
+        let pool = setup_pool();
+        let conn = pool.get().unwrap();
+
+        db::seed_employees(&conn).unwrap();
+
+        let unsupported: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_employees WHERE agent_backend != 'claude_code'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unsupported, 0);
     }
 
     #[actix_web::test]
-    async fn test_create_task_returns_created_with_correct_data() {
+    async fn test_create_task_returns_workflow_task() {
         let state = make_state(setup_pool());
         let app = test_app!(state);
 
@@ -243,1260 +234,556 @@ mod tests {
                 "assignee": "alice"
             }))
             .to_request();
-
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 201);
 
         let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["task_id"], "T-001");
-        assert_eq!(body["title"], "Build feature");
-        assert_eq!(body["description"], "Implement login");
-        assert_eq!(body["assignee"], "alice");
-        assert_eq!(body["completed"], false);
-        assert_eq!(body["status"], "Pending");
-        assert!(body["subtasks"].as_array().unwrap().is_empty());
-        assert!(body["id"].as_i64().unwrap() > 0);
+        assert_eq!(body["archived"], false);
+        assert_eq!(body["status"], "Plan");
     }
 
     #[actix_web::test]
-    async fn test_create_task_without_assignee() {
+    async fn test_get_tasks_returns_board_summary_shape() {
         let state = make_state(setup_pool());
         let app = test_app!(state);
 
-        let req = test::TestRequest::post()
+        let create_req = test::TestRequest::post()
             .uri("/api/tasks")
             .set_json(serde_json::json!({
-                "task_id": "T-002",
-                "title": "No assignee task",
+                "task_id": "T-SUM",
+                "title": "Board item",
                 "description": ""
             }))
             .to_request();
-
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 201);
-
-        let body: serde_json::Value = test::read_body_json(resp).await;
-        assert!(body["assignee"].is_null());
-    }
-
-    #[actix_web::test]
-    async fn test_create_task_duplicate_id_returns_409() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let payload = serde_json::json!({
-            "task_id": "T-DUP",
-            "title": "First",
-            "description": ""
-        });
-
-        let req1 = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(&payload)
-            .to_request();
-        let resp1 = test::call_service(&app, req1).await;
-        assert_eq!(resp1.status(), 201);
-
-        let req2 = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(&payload)
-            .to_request();
-        let resp2 = test::call_service(&app, req2).await;
-        assert_eq!(resp2.status(), 409);
-    }
-
-    #[actix_web::test]
-    async fn test_get_tasks_returns_all_tasks_ordered_by_created_at_desc() {
-        let pool = setup_pool();
-        {
-            let conn = pool.get().unwrap();
-            conn.execute(
-                "INSERT INTO tasks (task_id, title, description, completed, status, created_at) VALUES ('T-OLDER', 'Older', '', 0, 'Pending', '2024-01-01T00:00:00Z')",
-                [],
-            ).unwrap();
-            conn.execute(
-                "INSERT INTO tasks (task_id, title, description, completed, status, created_at) VALUES ('T-NEWER', 'Newer', '', 0, 'Pending', '2024-01-02T00:00:00Z')",
-                [],
-            ).unwrap();
-        }
-        let state = make_state(pool);
-        let app = test_app!(state);
-
-        let req = test::TestRequest::get().uri("/api/tasks").to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 200);
-
-        let body: Vec<serde_json::Value> = test::read_body_json(resp).await;
-        assert_eq!(body.len(), 2);
-        assert_eq!(body[0]["task_id"], "T-NEWER");
-        assert_eq!(body[1]["task_id"], "T-OLDER");
-    }
-
-    #[actix_web::test]
-    async fn test_get_tasks_includes_subtasks() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let create_req = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-S", "title": "Parent", "description": ""}))
-            .to_request();
         let create_resp = test::call_service(&app, create_req).await;
-        let task: serde_json::Value = test::read_body_json(create_resp).await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        let sub_req = test::TestRequest::post()
-            .uri(&format!("/api/tasks/{}/subtasks", task_id))
-            .set_json(serde_json::json!({"title": "Sub step"}))
-            .to_request();
-        test::call_service(&app, sub_req).await;
+        assert_eq!(create_resp.status(), 201);
 
         let list_req = test::TestRequest::get().uri("/api/tasks").to_request();
         let list_resp = test::call_service(&app, list_req).await;
-        let tasks: Vec<serde_json::Value> = test::read_body_json(list_resp).await;
+        assert_eq!(list_resp.status(), 200);
 
-        let parent = tasks.iter().find(|t| t["task_id"] == "T-S").unwrap();
-        let subtasks = parent["subtasks"].as_array().unwrap();
-        assert_eq!(subtasks.len(), 1);
-        assert_eq!(subtasks[0]["title"], "Sub step");
+        let body: Vec<serde_json::Value> = test::read_body_json(list_resp).await;
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["board_group"], "Plan");
+        assert!(body[0].get("events").is_none());
+        assert!(body[0].get("subtasks").is_none());
     }
 
     #[actix_web::test]
-    async fn test_update_task_fields_are_persisted() {
+    async fn test_get_task_detail_returns_timeline_payload() {
         let state = make_state(setup_pool());
         let app = test_app!(state);
 
         let create_req = test::TestRequest::post()
             .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-U", "title": "Old title", "description": "old"}))
-            .to_request();
-        let create_resp = test::call_service(&app, create_req).await;
-        let task: serde_json::Value = test::read_body_json(create_resp).await;
-        let id = task["id"].as_i64().unwrap();
-
-        let update_req = test::TestRequest::put()
-            .uri(&format!("/api/tasks/{}", id))
             .set_json(serde_json::json!({
-                "title": "New title",
-                "description": "new desc",
-                "status": "Doing",
-                "assignee": "bob",
-                "completed": true
+                "task_id": "T-DETAIL",
+                "title": "Detail item",
+                "description": "Trace me"
             }))
             .to_request();
-        let update_resp = test::call_service(&app, update_req).await;
-        assert_eq!(update_resp.status(), 200);
-
-        let body: serde_json::Value = test::read_body_json(update_resp).await;
-        assert_eq!(body["title"], "New title");
-        assert_eq!(body["description"], "new desc");
-        assert_eq!(body["status"], "Doing");
-        assert_eq!(body["assignee"], "bob");
-        assert_eq!(body["completed"], true);
-        assert_eq!(body["id"], id);
-
-        let get_req = test::TestRequest::get().uri("/api/tasks").to_request();
-        let tasks: Vec<serde_json::Value> =
-            test::read_body_json(test::call_service(&app, get_req).await).await;
-        let persisted = tasks.iter().find(|t| t["id"] == id).unwrap();
-        assert_eq!(persisted["title"], "New title");
-        assert_eq!(persisted["status"], "Doing");
-        assert_eq!(persisted["assignee"], "bob");
-        assert_eq!(persisted["completed"], true);
-    }
-
-    #[actix_web::test]
-    async fn test_update_task_partial_update_preserves_unchanged_fields() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let create_req = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-P", "title": "Keep me", "description": "keep desc", "assignee": "carol"}))
-            .to_request();
-        let create_resp = test::call_service(&app, create_req).await;
-        let task: serde_json::Value = test::read_body_json(create_resp).await;
-        let id = task["id"].as_i64().unwrap();
-
-        let update_req = test::TestRequest::put()
-            .uri(&format!("/api/tasks/{}", id))
-            .set_json(serde_json::json!({"status": "Reviewing"}))
-            .to_request();
-        let update_resp = test::call_service(&app, update_req).await;
-        assert_eq!(update_resp.status(), 200);
-
-        let body: serde_json::Value = test::read_body_json(update_resp).await;
-        assert_eq!(body["title"], "Keep me");
-        assert_eq!(body["description"], "keep desc");
-        assert_eq!(body["assignee"], "carol");
-        assert_eq!(body["status"], "Reviewing");
-    }
-
-    #[actix_web::test]
-    async fn test_update_task_not_found_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::put()
-            .uri("/api/tasks/9999")
-            .set_json(serde_json::json!({"title": "ghost"}))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_update_task_duplicate_task_id_returns_409() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        for (id, title) in [("T-X", "X"), ("T-Y", "Y")] {
-            let req = test::TestRequest::post()
-                .uri("/api/tasks")
-                .set_json(serde_json::json!({"task_id": id, "title": title, "description": ""}))
-                .to_request();
-            test::call_service(&app, req).await;
-        }
-
-        let list_req = test::TestRequest::get().uri("/api/tasks").to_request();
-        let list_resp = test::call_service(&app, list_req).await;
-        let tasks: Vec<serde_json::Value> = test::read_body_json(list_resp).await;
-        let tx = tasks.iter().find(|t| t["task_id"] == "T-X").unwrap();
-        let id = tx["id"].as_i64().unwrap();
-
-        let req = test::TestRequest::put()
-            .uri(&format!("/api/tasks/{}", id))
-            .set_json(serde_json::json!({"task_id": "T-Y"}))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 409);
-    }
-
-    #[actix_web::test]
-    async fn test_delete_task_removes_it_from_list() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let create_req = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-DEL", "title": "To delete", "description": ""}))
-            .to_request();
-        let create_resp = test::call_service(&app, create_req).await;
-        let task: serde_json::Value = test::read_body_json(create_resp).await;
-        let id = task["id"].as_i64().unwrap();
-
-        let del_req = test::TestRequest::delete()
-            .uri(&format!("/api/tasks/{}", id))
-            .to_request();
-        let del_resp = test::call_service(&app, del_req).await;
-        assert_eq!(del_resp.status(), 204);
-
-        let list_req = test::TestRequest::get().uri("/api/tasks").to_request();
-        let list_resp = test::call_service(&app, list_req).await;
-        let tasks: Vec<serde_json::Value> = test::read_body_json(list_resp).await;
-        assert!(!tasks.iter().any(|t| t["task_id"] == "T-DEL"));
-    }
-
-    #[actix_web::test]
-    async fn test_delete_task_not_found_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::delete()
-            .uri("/api/tasks/9999")
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_delete_task_cascades_subtasks() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let create_req = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-CASCADE", "title": "Parent", "description": ""}))
-            .to_request();
         let create_resp = test::call_service(&app, create_req).await;
         let task: serde_json::Value = test::read_body_json(create_resp).await;
         let task_id = task["id"].as_i64().unwrap();
 
-        let sub_req = test::TestRequest::post()
-            .uri(&format!("/api/tasks/{}/subtasks", task_id))
-            .set_json(serde_json::json!({"title": "Child"}))
-            .to_request();
-        let sub_resp = test::call_service(&app, sub_req).await;
-        let sub: serde_json::Value = test::read_body_json(sub_resp).await;
-        let sub_id = sub["id"].as_i64().unwrap();
-
-        let del_req = test::TestRequest::delete()
+        let detail_req = test::TestRequest::get()
             .uri(&format!("/api/tasks/{}", task_id))
             .to_request();
-        test::call_service(&app, del_req).await;
+        let detail_resp = test::call_service(&app, detail_req).await;
+        assert_eq!(detail_resp.status(), 200);
 
-        let conn = state.db.get().unwrap();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM subtasks WHERE id = ?1",
-                params![sub_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
+        let body: serde_json::Value = test::read_body_json(detail_resp).await;
+        assert_eq!(body["task"]["task_id"], "T-DETAIL");
+        assert!(body["events"].as_array().unwrap().is_empty());
+        assert!(body["current_action_label"].is_string());
     }
 
     #[actix_web::test]
-    async fn test_add_subtask_returns_created_with_correct_data() {
+    async fn test_transition_happy_path_writes_event() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let employee_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Planner",
+                "role": "Planner",
+                "workflow_role": "planner",
+                "department": "Ops",
+                "agent_backend": "claude_code"
+            }))
+            .to_request();
+        let employee_resp = test::call_service(&app, employee_req).await;
+        let employee: serde_json::Value = test::read_body_json(employee_resp).await;
+        let employee_id = employee["id"].as_i64().unwrap();
+
+        let task_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-MOVE",
+                "title": "Move it",
+                "description": ""
+            }))
+            .to_request();
+        let task_resp = test::call_service(&app, task_req).await;
+        let task: serde_json::Value = test::read_body_json(task_resp).await;
+        let task_id = task["id"].as_i64().unwrap();
+
+        let transition_req = test::TestRequest::post()
+            .uri(&format!("/api/tasks/{}/transition", task_id))
+            .set_json(serde_json::json!({
+                "actor_type": "employee",
+                "actor_id": employee_id,
+                "from_status": "Plan",
+                "to_status": "Design",
+                "action": "advance"
+            }))
+            .to_request();
+        let transition_resp = test::call_service(&app, transition_req).await;
+        assert_eq!(transition_resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(transition_resp).await;
+        assert_eq!(body["task"]["task"]["status"], "Design");
+        assert_eq!(body["task"]["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn test_archive_requires_human_actor() {
         let state = make_state(setup_pool());
         let app = test_app!(state);
 
         let create_req = test::TestRequest::post()
             .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-S2", "title": "Parent", "description": ""}))
+            .set_json(serde_json::json!({
+                "task_id": "T-ARCH",
+                "title": "Archive me",
+                "description": ""
+            }))
             .to_request();
         let create_resp = test::call_service(&app, create_req).await;
         let task: serde_json::Value = test::read_body_json(create_resp).await;
         let task_id = task["id"].as_i64().unwrap();
-
-        let sub_req = test::TestRequest::post()
-            .uri(&format!("/api/tasks/{}/subtasks", task_id))
-            .set_json(serde_json::json!({"title": "Write tests", "assignee": "dave"}))
-            .to_request();
-        let sub_resp = test::call_service(&app, sub_req).await;
-        assert_eq!(sub_resp.status(), 201);
-
-        let body: serde_json::Value = test::read_body_json(sub_resp).await;
-        assert_eq!(body["title"], "Write tests");
-        assert_eq!(body["assignee"], "dave");
-        assert_eq!(body["completed"], false);
-        assert_eq!(body["status"], "Pending");
-        assert_eq!(body["task_id"], task_id);
-        assert!(body["id"].as_i64().unwrap() > 0);
-    }
-
-    #[actix_web::test]
-    async fn test_toggle_subtask_flips_completed() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let create_req = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-TOG", "title": "P", "description": ""}))
-            .to_request();
-        let create_resp = test::call_service(&app, create_req).await;
-        let task: serde_json::Value = test::read_body_json(create_resp).await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        let sub_req = test::TestRequest::post()
-            .uri(&format!("/api/tasks/{}/subtasks", task_id))
-            .set_json(serde_json::json!({"title": "Toggle me"}))
-            .to_request();
-        let sub_resp = test::call_service(&app, sub_req).await;
-        let sub: serde_json::Value = test::read_body_json(sub_resp).await;
-        let sub_id = sub["id"].as_i64().unwrap();
-
-        let toggle_req = test::TestRequest::post()
-            .uri(&format!(
-                "/api/tasks/{}/subtasks/{}/toggle",
-                task_id, sub_id
-            ))
-            .to_request();
-        let toggle_resp = test::call_service(&app, toggle_req).await;
-        assert_eq!(toggle_resp.status(), 200);
 
         {
             let conn = state.db.get().unwrap();
-            let completed: i32 = conn
-                .query_row(
-                    "SELECT completed FROM subtasks WHERE id = ?1",
-                    params![sub_id],
-                    |r| r.get(0),
-                )
+            conn.execute("UPDATE tasks SET status = 'Done' WHERE id = ?1", [task_id])
                 .unwrap();
-            assert_eq!(completed, 1);
         }
 
-        let toggle_req2 = test::TestRequest::post()
-            .uri(&format!(
-                "/api/tasks/{}/subtasks/{}/toggle",
-                task_id, sub_id
-            ))
-            .to_request();
-        test::call_service(&app, toggle_req2).await;
-
-        let conn = state.db.get().unwrap();
-        let completed2: i32 = conn
-            .query_row(
-                "SELECT completed FROM subtasks WHERE id = ?1",
-                params![sub_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(completed2, 0);
-    }
-
-    #[actix_web::test]
-    async fn test_update_subtask_persists_changes() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let create_req = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-US", "title": "P", "description": ""}))
-            .to_request();
-        let create_resp = test::call_service(&app, create_req).await;
-        let task: serde_json::Value = test::read_body_json(create_resp).await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        let sub_req = test::TestRequest::post()
-            .uri(&format!("/api/tasks/{}/subtasks", task_id))
-            .set_json(serde_json::json!({"title": "Original"}))
-            .to_request();
-        let sub_resp = test::call_service(&app, sub_req).await;
-        let sub: serde_json::Value = test::read_body_json(sub_resp).await;
-        let sub_id = sub["id"].as_i64().unwrap();
-
-        let update_req = test::TestRequest::put()
-            .uri(&format!("/api/tasks/{}/subtasks/{}", task_id, sub_id))
+        let archive_req = test::TestRequest::post()
+            .uri(&format!("/api/tasks/{}/transition", task_id))
             .set_json(serde_json::json!({
-                "title": "Updated",
-                "completed": true,
-                "status": "Done",
-                "assignee": "eve"
+                "actor_type": "employee",
+                "actor_label": "automation",
+                "from_status": "Done",
+                "to_status": "Done",
+                "action": "archive"
             }))
             .to_request();
-        let update_resp = test::call_service(&app, update_req).await;
-        assert_eq!(update_resp.status(), 200);
-
-        let conn = state.db.get().unwrap();
-        let (title, completed, status, assignee): (String, i32, String, Option<String>) = conn
-            .query_row(
-                "SELECT title, completed, status, assignee FROM subtasks WHERE id = ?1",
-                params![sub_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-
-        assert_eq!(title, "Updated");
-        assert_eq!(completed, 1);
-        assert_eq!(status, "Done");
-        assert_eq!(assignee, Some("eve".to_string()));
+        let archive_resp = test::call_service(&app, archive_req).await;
+        assert_eq!(archive_resp.status(), 400);
     }
 
     #[actix_web::test]
-    async fn test_update_subtask_partial_preserves_unchanged_fields() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let create_req = test::TestRequest::post()
-            .uri("/api/tasks")
-            .set_json(serde_json::json!({"task_id": "T-UPP", "title": "P", "description": ""}))
-            .to_request();
-        let create_resp = test::call_service(&app, create_req).await;
-        let task: serde_json::Value = test::read_body_json(create_resp).await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        let sub_req = test::TestRequest::post()
-            .uri(&format!("/api/tasks/{}/subtasks", task_id))
-            .set_json(serde_json::json!({"title": "Keep title", "assignee": "frank"}))
-            .to_request();
-        let sub_resp = test::call_service(&app, sub_req).await;
-        let sub: serde_json::Value = test::read_body_json(sub_resp).await;
-        let sub_id = sub["id"].as_i64().unwrap();
-
-        let update_req = test::TestRequest::put()
-            .uri(&format!("/api/tasks/{}/subtasks/{}", task_id, sub_id))
-            .set_json(serde_json::json!({"status": "Doing"}))
-            .to_request();
-        test::call_service(&app, update_req).await;
-
-        let conn = state.db.get().unwrap();
-        let (title, assignee, status): (String, Option<String>, String) = conn
-            .query_row(
-                "SELECT title, assignee, status FROM subtasks WHERE id = ?1",
-                params![sub_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-
-        assert_eq!(title, "Keep title");
-        assert_eq!(assignee, Some("frank".to_string()));
-        assert_eq!(status, "Doing");
-    }
-
-    #[actix_web::test]
-    async fn test_update_subtask_not_found_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::put()
-            .uri("/api/tasks/1/subtasks/9999")
-            .set_json(serde_json::json!({"title": "ghost"}))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_add_subtask_nonexistent_parent_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::post()
-            .uri("/api/tasks/9999/subtasks")
-            .set_json(serde_json::json!({"title": "Orphan"}))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_toggle_subtask_nonexistent_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::post()
-            .uri("/api/tasks/1/subtasks/9999/toggle")
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_toggle_subtask_wrong_task_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let t1: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-TOG1", "title": "P1", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let t2: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-TOG2", "title": "P2", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let t1_id = t1["id"].as_i64().unwrap();
-        let t2_id = t2["id"].as_i64().unwrap();
-
-        let sub: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri(&format!("/api/tasks/{}/subtasks", t1_id))
-                    .set_json(serde_json::json!({"title": "Sub"}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let sub_id = sub["id"].as_i64().unwrap();
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!(
-                    "/api/tasks/{}/subtasks/{}/toggle",
-                    t2_id, sub_id
-                ))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_update_subtask_wrong_task_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let t1: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-OWN1", "title": "P1", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let t2: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-OWN2", "title": "P2", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let t1_id = t1["id"].as_i64().unwrap();
-        let t2_id = t2["id"].as_i64().unwrap();
-
-        let sub: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri(&format!("/api/tasks/{}/subtasks", t1_id))
-                    .set_json(serde_json::json!({"title": "Sub"}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let sub_id = sub["id"].as_i64().unwrap();
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::put()
-                .uri(&format!("/api/tasks/{}/subtasks/{}", t2_id, sub_id))
-                .set_json(serde_json::json!({"title": "Hijacked"}))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_update_task_clear_assignee() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-CLR", "title": "T", "description": "", "assignee": "alice"}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let id = task["id"].as_i64().unwrap();
-        assert_eq!(task["assignee"], "alice");
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::put()
-                .uri(&format!("/api/tasks/{}", id))
-                .set_json(serde_json::json!({"assignee": null}))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 200);
-
-        let tasks: Vec<serde_json::Value> = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::get().uri("/api/tasks").to_request(),
-            )
-            .await,
-        )
-        .await;
-        let updated = tasks.iter().find(|t| t["id"] == id).unwrap();
-        assert!(updated["assignee"].is_null());
-    }
-
-    #[actix_web::test]
-    async fn test_update_subtask_clear_assignee() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-SCLR", "title": "P", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        let sub: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri(&format!("/api/tasks/{}/subtasks", task_id))
-                    .set_json(serde_json::json!({"title": "Sub", "assignee": "bob"}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let sub_id = sub["id"].as_i64().unwrap();
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::put()
-                .uri(&format!("/api/tasks/{}/subtasks/{}", task_id, sub_id))
-                .set_json(serde_json::json!({"assignee": null}))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 200);
-
-        let conn = state.db.get().unwrap();
-        let assignee: Option<String> = conn
-            .query_row(
-                "SELECT assignee FROM subtasks WHERE id = ?1",
-                params![sub_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(assignee.is_none());
-    }
-
-    #[actix_web::test]
-    async fn test_create_task_missing_required_field_returns_400() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri("/api/tasks")
-                .set_json(serde_json::json!({"task_id": "T-BAD", "description": "no title"}))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 400);
-    }
-
-    // ── Employee CRUD ───────────────────────────────────────────────────────
-
-    fn setup_pool_with_seed() -> db::DbPool {
-        let pool = setup_pool();
-        let conn = pool.get().unwrap();
-        db::seed_employees(&conn).unwrap();
-        pool
-    }
-
-    #[actix_web::test]
-    async fn test_get_employees_returns_seeded() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::get().uri("/api/employees").to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 200);
-
-        let body: Vec<serde_json::Value> = test::read_body_json(resp).await;
-        assert_eq!(body.len(), 5);
-        assert_eq!(body[0]["name"], "Alice");
-        assert_eq!(body[0]["status"], "idle");
-        assert_eq!(body[0]["agent_backend"], "claude_code");
-    }
-
-    #[actix_web::test]
-    async fn test_get_employee_by_id() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::get().uri("/api/employees/1").to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 200);
-
-        let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["name"], "Alice");
-    }
-
-    #[actix_web::test]
-    async fn test_get_employee_not_found() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let req = test::TestRequest::get().uri("/api/employees/999").to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_create_employee() {
+    async fn test_create_employee_persists_workflow_role() {
         let state = make_state(setup_pool());
         let app = test_app!(state);
 
         let req = test::TestRequest::post()
             .uri("/api/employees")
             .set_json(serde_json::json!({
-                "name": "Frank",
-                "role": "Security Engineer",
-                "department": "Security",
-                "agent_backend": "claude_code",
-                "system_prompt": "You are Frank."
+                "name": "Reviewer",
+                "role": "Reviewer",
+                "workflow_role": "reviewer",
+                "department": "QA",
+                "agent_backend": "claude_code"
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 201);
 
         let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["name"], "Frank");
-        assert_eq!(body["status"], "idle");
-        assert!(body["id"].as_i64().unwrap() > 0);
+        assert_eq!(body["workflow_role"], "reviewer");
     }
 
     #[actix_web::test]
-    async fn test_update_employee() {
-        let state = make_state(setup_pool_with_seed());
+    async fn test_create_employee_rejects_unsupported_backend() {
+        let state = make_state(setup_pool());
         let app = test_app!(state);
 
-        let req = test::TestRequest::put()
-            .uri("/api/employees/1")
-            .set_json(serde_json::json!({"role": "Staff Engineer"}))
+        let req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Bad backend",
+                "role": "Reviewer",
+                "workflow_role": "reviewer",
+                "department": "QA",
+                "agent_backend": "codex"
+            }))
             .to_request();
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 200);
-
-        let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["name"], "Alice");
-        assert_eq!(body["role"], "Staff Engineer");
+        assert_eq!(resp.status(), 400);
     }
 
     #[actix_web::test]
-    async fn test_delete_employee() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::delete().uri("/api/employees/5").to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 204);
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::get().uri("/api/employees/5").to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    #[actix_web::test]
-    async fn test_delete_employee_not_found() {
+    async fn test_get_current_execution_returns_running_row() {
         let state = make_state(setup_pool());
-        let app = test_app!(state);
+        let app = test_app!(state.clone());
 
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::delete().uri("/api/employees/999").to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 404);
-    }
+        let employee_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Runner",
+                "role": "Coder",
+                "workflow_role": "coder",
+                "department": "Engineering",
+                "agent_backend": "claude_code"
+            }))
+            .to_request();
+        let employee_resp = test::call_service(&app, employee_req).await;
+        let employee: serde_json::Value = test::read_body_json(employee_resp).await;
+        let employee_id = employee["id"].as_i64().unwrap();
 
-    // ── Task assignment ─────────────────────────────────────────────────────
-
-    #[actix_web::test]
-    async fn test_assign_task_to_employee() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        // Create a task first
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-ASSIGN", "title": "Do work", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
+        let task_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-CURRENT",
+                "title": "Current execution",
+                "description": ""
+            }))
+            .to_request();
+        let task_resp = test::call_service(&app, task_req).await;
+        let task: serde_json::Value = test::read_body_json(task_resp).await;
         let task_id = task["id"].as_i64().unwrap();
 
-        // Assign to Alice (id=1)
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/employees/1/assign/{}", task_id))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 201);
-
-        let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["task_id"], task_id);
-        assert_eq!(body["employee_id"], 1);
-        assert_eq!(body["status"], "running");
-
-        // Alice should now be "working"
-        let emp: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::get().uri("/api/employees/1").to_request(),
-            )
-            .await,
-        )
-        .await;
-        assert_eq!(emp["status"], "working");
-    }
-
-    #[actix_web::test]
-    async fn test_assign_task_to_busy_employee_returns_409() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-BUSY", "title": "Work", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        // First assignment succeeds
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/employees/1/assign/{}", task_id))
-                .to_request(),
-        )
-        .await;
-
-        // Second assignment should fail
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/employees/1/assign/{}", task_id))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 409);
-    }
-
-    #[actix_web::test]
-    async fn test_assign_nonexistent_task_returns_404() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri("/api/employees/1/assign/9999")
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    // ── Cancel execution ────────────────────────────────────────────────────
-
-    #[actix_web::test]
-    async fn test_cancel_execution() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        // Create task and assign
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-CANCEL", "title": "Work", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        let exec: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri(&format!("/api/employees/1/assign/{}", task_id))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let exec_id = exec["id"].as_i64().unwrap();
-
-        // Cancel it
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/executions/{}/cancel", exec_id))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 200);
-
-        let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["status"], "cancelled");
-        assert!(!body["finished_at"].is_null());
-
-        // Employee should be idle again
-        let emp: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::get().uri("/api/employees/1").to_request(),
-            )
-            .await,
-        )
-        .await;
-        assert_eq!(emp["status"], "idle");
-    }
-
-    #[actix_web::test]
-    async fn test_cancel_already_completed_returns_409() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-DONE", "title": "Work", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        let exec: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri(&format!("/api/employees/1/assign/{}", task_id))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let exec_id = exec["id"].as_i64().unwrap();
-
-        // Cancel once (succeeds)
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/executions/{}/cancel", exec_id))
-                .to_request(),
-        )
-        .await;
-
-        // Cancel again (fails)
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/executions/{}/cancel", exec_id))
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 409);
-    }
-
-    // ── Execution history ───────────────────────────────────────────────────
-
-    #[actix_web::test]
-    async fn test_get_executions_for_employee() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        // Create task and assign
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-HIST", "title": "Work", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/employees/1/assign/{}", task_id))
-                .to_request(),
-        )
-        .await;
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::get()
-                .uri("/api/employees/1/executions")
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 200);
-
-        let body: Vec<serde_json::Value> = test::read_body_json(resp).await;
-        assert_eq!(body.len(), 1);
-        assert_eq!(body[0]["task_id"], task_id);
-        assert_eq!(body[0]["status"], "running");
-    }
-
-    #[actix_web::test]
-    async fn test_get_executions_nonexistent_employee_returns_404() {
-        let state = make_state(setup_pool());
-        let app = test_app!(state);
-
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::get()
-                .uri("/api/employees/999/executions")
-                .to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    // ── Seeding ─────────────────────────────────────────────────────────────
-
-    #[actix_web::test]
-    async fn test_seed_is_idempotent() {
-        let pool = setup_pool();
-        {
-            let conn = pool.get().unwrap();
-            db::seed_employees(&conn).unwrap();
-            db::seed_employees(&conn).unwrap();
-            let count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM ai_employees", [], |r| r.get(0))
-                .unwrap();
-            assert_eq!(count, 5);
-        }
-    }
-
-    // ── Startup recovery ────────────────────────────────────────────────────
-
-    #[actix_web::test]
-    async fn test_startup_recovery_marks_running_as_failed() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
-
-        // Create task and assign
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-REC", "title": "Work", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let task_id = task["id"].as_i64().unwrap();
-
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri(&format!("/api/employees/1/assign/{}", task_id))
-                .to_request(),
-        )
-        .await;
-
-        // Simulate server restart
         {
             let conn = state.db.get().unwrap();
-            db::startup_recovery(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO task_executions (task_id, employee_id, started_at, status) VALUES (?1, ?2, datetime('now'), 'running')",
+                rusqlite::params![task_id, employee_id],
+            )
+            .unwrap();
         }
 
-        // Execution should be failed
-        let conn = state.db.get().unwrap();
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM task_executions WHERE task_id = ?1",
-                params![task_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "failed");
+        let current_req = test::TestRequest::get()
+            .uri(&format!("/api/employees/{}/current_execution", employee_id))
+            .to_request();
+        let current_resp = test::call_service(&app, current_req).await;
+        assert_eq!(current_resp.status(), 200);
 
-        // Employee should be idle
-        let emp_status: String = conn
-            .query_row(
-                "SELECT status FROM ai_employees WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(emp_status, "idle");
+        let body: serde_json::Value = test::read_body_json(current_resp).await;
+        assert_eq!(body["task_id"], task_id);
+        assert_eq!(body["task_key"], "T-CURRENT");
     }
 
-    // ── Delete employee cancels running execution ───────────────────────────
-
     #[actix_web::test]
-    async fn test_delete_employee_cancels_execution() {
-        let state = make_state(setup_pool_with_seed());
-        let app = test_app!(state);
+    async fn test_reviewer_can_reject_back_to_coding() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state.clone());
 
-        let task: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri("/api/tasks")
-                    .set_json(serde_json::json!({"task_id": "T-EDEL", "title": "Work", "description": ""}))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
+        let reviewer_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Reviewer",
+                "role": "Reviewer",
+                "workflow_role": "reviewer",
+                "department": "QA",
+                "agent_backend": "claude_code"
+            }))
+            .to_request();
+        let reviewer_resp = test::call_service(&app, reviewer_req).await;
+        let reviewer: serde_json::Value = test::read_body_json(reviewer_resp).await;
+
+        let task_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-REJECT",
+                "title": "Reject me",
+                "description": ""
+            }))
+            .to_request();
+        let task_resp = test::call_service(&app, task_req).await;
+        let task: serde_json::Value = test::read_body_json(task_resp).await;
         let task_id = task["id"].as_i64().unwrap();
 
-        let exec: serde_json::Value = test::read_body_json(
-            test::call_service(
-                &app,
-                test::TestRequest::post()
-                    .uri(&format!("/api/employees/1/assign/{}", task_id))
-                    .to_request(),
-            )
-            .await,
-        )
-        .await;
-        let exec_id = exec["id"].as_i64().unwrap();
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute("UPDATE tasks SET status = 'Review' WHERE id = ?1", [task_id])
+                .unwrap();
+        }
 
-        // Delete employee
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::delete().uri("/api/employees/1").to_request(),
-        )
-        .await;
-        assert_eq!(resp.status(), 204);
+        let reject_req = test::TestRequest::post()
+            .uri(&format!("/api/tasks/{}/transition", task_id))
+            .set_json(serde_json::json!({
+                "actor_type": "employee",
+                "actor_id": reviewer["id"],
+                "from_status": "Review",
+                "to_status": "Coding",
+                "action": "reject",
+                "note": "Needs implementation fixes"
+            }))
+            .to_request();
+        let reject_resp = test::call_service(&app, reject_req).await;
+        assert_eq!(reject_resp.status(), 200);
 
-        // Execution should be cancelled (cascade will delete it, but let's check before cascade)
-        // Actually, ON DELETE CASCADE means the execution row is gone too
-        let conn = state.db.get().unwrap();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_executions WHERE id = ?1",
-                params![exec_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
+        let body: serde_json::Value = test::read_body_json(reject_resp).await;
+        assert_eq!(body["task"]["task"]["status"], "Coding");
+        assert_eq!(body["task"]["events"][0]["action"], "reject");
+    }
+
+    #[actix_web::test]
+    async fn test_human_can_archive_done_task() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state.clone());
+
+        let task_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-DONE",
+                "title": "Archive done task",
+                "description": ""
+            }))
+            .to_request();
+        let task_resp = test::call_service(&app, task_req).await;
+        let task: serde_json::Value = test::read_body_json(task_resp).await;
+        let task_id = task["id"].as_i64().unwrap();
+
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute("UPDATE tasks SET status = 'Done' WHERE id = ?1", [task_id])
+                .unwrap();
+        }
+
+        let archive_req = test::TestRequest::post()
+            .uri(&format!("/api/tasks/{}/transition", task_id))
+            .set_json(serde_json::json!({
+                "actor_type": "human",
+                "actor_label": "Project owner",
+                "from_status": "Done",
+                "to_status": "Done",
+                "action": "archive"
+            }))
+            .to_request();
+        let archive_resp = test::call_service(&app, archive_req).await;
+        assert_eq!(archive_resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(archive_resp).await;
+        assert_eq!(body["task"]["task"]["archived"], true);
+        assert_eq!(body["task"]["events"][0]["action"], "archive");
+    }
+
+    #[actix_web::test]
+    async fn test_update_task_preserves_workflow_status() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state.clone());
+
+        let create_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-UPD",
+                "title": "Editable task",
+                "description": "before",
+                "assignee": "Alice"
+            }))
+            .to_request();
+        let create_resp = test::call_service(&app, create_req).await;
+        let task: serde_json::Value = test::read_body_json(create_resp).await;
+        let task_id = task["id"].as_i64().unwrap();
+
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute("UPDATE tasks SET status = 'Review' WHERE id = ?1", [task_id])
+                .unwrap();
+        }
+
+        let update_req = test::TestRequest::put()
+            .uri(&format!("/api/tasks/{}", task_id))
+            .set_json(serde_json::json!({
+                "title": "Editable task v2",
+                "description": "after",
+                "assignee": "Bob"
+            }))
+            .to_request();
+        let update_resp = test::call_service(&app, update_req).await;
+        assert_eq!(update_resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(update_resp).await;
+        assert_eq!(body["title"], "Editable task v2");
+        assert_eq!(body["description"], "after");
+        assert_eq!(body["assignee"], "Bob");
+        assert_eq!(body["status"], "Review");
+    }
+
+    #[actix_web::test]
+    async fn test_update_task_cannot_archive_directly() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state.clone());
+
+        let create_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-NOARCHIVE",
+                "title": "Keep visible",
+                "description": ""
+            }))
+            .to_request();
+        let create_resp = test::call_service(&app, create_req).await;
+        let task: serde_json::Value = test::read_body_json(create_resp).await;
+        let task_id = task["id"].as_i64().unwrap();
+
+        let update_req = test::TestRequest::put()
+            .uri(&format!("/api/tasks/{}", task_id))
+            .set_json(serde_json::json!({
+                "archived": true
+            }))
+            .to_request();
+        let update_resp = test::call_service(&app, update_req).await;
+        assert_eq!(update_resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(update_resp).await;
+        assert_eq!(body["archived"], false);
+    }
+
+    #[actix_web::test]
+    async fn test_get_tasks_clears_attention_after_advance() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state.clone());
+
+        let coder_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Coder",
+                "role": "Coder",
+                "workflow_role": "coder",
+                "department": "Engineering",
+                "agent_backend": "claude_code"
+            }))
+            .to_request();
+        let coder_resp = test::call_service(&app, coder_req).await;
+        let coder: serde_json::Value = test::read_body_json(coder_resp).await;
+
+        let reviewer_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Reviewer",
+                "role": "Reviewer",
+                "workflow_role": "reviewer",
+                "department": "QA",
+                "agent_backend": "claude_code"
+            }))
+            .to_request();
+        let reviewer_resp = test::call_service(&app, reviewer_req).await;
+        let reviewer: serde_json::Value = test::read_body_json(reviewer_resp).await;
+
+        let task_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-ATTN",
+                "title": "Attention lifecycle",
+                "description": ""
+            }))
+            .to_request();
+        let task_resp = test::call_service(&app, task_req).await;
+        let task: serde_json::Value = test::read_body_json(task_resp).await;
+        let task_id = task["id"].as_i64().unwrap();
+
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute("UPDATE tasks SET status = 'Review' WHERE id = ?1", [task_id])
+                .unwrap();
+        }
+
+        let reject_req = test::TestRequest::post()
+            .uri(&format!("/api/tasks/{}/transition", task_id))
+            .set_json(serde_json::json!({
+                "actor_type": "employee",
+                "actor_id": reviewer["id"],
+                "from_status": "Review",
+                "to_status": "Coding",
+                "action": "reject",
+                "note": "Still broken"
+            }))
+            .to_request();
+        let reject_resp = test::call_service(&app, reject_req).await;
+        assert_eq!(reject_resp.status(), 200);
+
+        let list_req = test::TestRequest::get().uri("/api/tasks").to_request();
+        let list_resp = test::call_service(&app, list_req).await;
+        let list_body: Vec<serde_json::Value> = test::read_body_json(list_resp).await;
+        assert_eq!(list_body[0]["needs_attention"], true);
+
+        let advance_req = test::TestRequest::post()
+            .uri(&format!("/api/tasks/{}/transition", task_id))
+            .set_json(serde_json::json!({
+                "actor_type": "employee",
+                "actor_id": coder["id"],
+                "from_status": "Coding",
+                "to_status": "Review",
+                "action": "advance"
+            }))
+            .to_request();
+        let advance_resp = test::call_service(&app, advance_req).await;
+        assert_eq!(advance_resp.status(), 200);
+
+        let list_req = test::TestRequest::get().uri("/api/tasks").to_request();
+        let list_resp = test::call_service(&app, list_req).await;
+        let list_body: Vec<serde_json::Value> = test::read_body_json(list_resp).await;
+        assert_eq!(list_body[0]["needs_attention"], false);
+    }
+
+    #[actix_web::test]
+    async fn test_qa_can_reject_back_to_coding() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state.clone());
+
+        let qa_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "QA",
+                "role": "QA",
+                "workflow_role": "qa",
+                "department": "QA",
+                "agent_backend": "claude_code"
+            }))
+            .to_request();
+        let qa_resp = test::call_service(&app, qa_req).await;
+        let qa: serde_json::Value = test::read_body_json(qa_resp).await;
+
+        let task_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-QA-REJECT",
+                "title": "QA reject",
+                "description": ""
+            }))
+            .to_request();
+        let task_resp = test::call_service(&app, task_req).await;
+        let task: serde_json::Value = test::read_body_json(task_resp).await;
+        let task_id = task["id"].as_i64().unwrap();
+
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute("UPDATE tasks SET status = 'QA' WHERE id = ?1", [task_id])
+                .unwrap();
+        }
+
+        let reject_req = test::TestRequest::post()
+            .uri(&format!("/api/tasks/{}/transition", task_id))
+            .set_json(serde_json::json!({
+                "actor_type": "employee",
+                "actor_id": qa["id"],
+                "from_status": "QA",
+                "to_status": "Coding",
+                "action": "reject",
+                "note": "Regression still open"
+            }))
+            .to_request();
+        let reject_resp = test::call_service(&app, reject_req).await;
+        assert_eq!(reject_resp.status(), 200);
+
+        let body: serde_json::Value = test::read_body_json(reject_resp).await;
+        assert_eq!(body["task"]["task"]["status"], "Coding");
+        assert_eq!(body["task"]["events"][0]["note"], "Regression still open");
     }
 }
 

@@ -2,11 +2,15 @@ use actix_web::web::Bytes;
 use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use rusqlite::params;
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc,
+};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::broadcast;
 
 use crate::adapters::{EmployeeConfig, TaskInfo};
-use crate::db::AppState;
+use crate::db::{AppState, OutputEvent};
 use crate::errors::AppError;
 use crate::models::*;
 
@@ -45,14 +49,13 @@ pub async fn spawn_execution(
     }
 
     let (cancel_tx, _) = broadcast::channel::<()>(1);
-    let (output_tx, _) = broadcast::channel::<String>(256);
+    let (output_tx, _) = broadcast::channel::<OutputEvent>(256);
 
     {
         let mut running = state.running.lock().await;
         running.insert(
             execution_id,
             crate::db::RunningExecution {
-                child_id,
                 cancel_tx: cancel_tx.clone(),
                 output_tx: output_tx.clone(),
             },
@@ -66,60 +69,83 @@ pub async fn spawn_execution(
 
     tokio::spawn(async move {
         let mut child = process.child;
-        let mut lines = process.stdout.lines();
-        let mut seq: i64 = 0;
-        let mut chunks_count: i64 = 0;
+        let mut stdout_lines = process.stdout.lines();
+        let mut stderr_lines = process.stderr.lines();
+        let seq = Arc::new(AtomicI64::new(0));
+        let chunks_count = Arc::new(AtomicI64::new(0));
         let max_chunks = 10000;
         let mut cancelled = false;
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+
+        let emit_chunk = |line: String, is_stderr: bool, seq: &Arc<AtomicI64>, chunks_count: &Arc<AtomicI64>| {
+            let seq_value = seq.fetch_add(1, Ordering::Relaxed) + 1;
+            let now = Utc::now().to_rfc3339();
+            let chunk = if is_stderr {
+                format!("[stderr] {}", line)
+            } else {
+                line
+            };
+
+            if chunks_count.fetch_add(1, Ordering::Relaxed) < max_chunks {
+                if let Ok(conn) = state_clone.db.get() {
+                    let _ = conn.execute(
+                        "INSERT INTO output_chunks (execution_id, seq, chunk, created_at) VALUES (?1, ?2, ?3, ?4)",
+                        params![execution_id, seq_value, &chunk, &now],
+                    );
+                }
+
+                let _ = output_tx_clone.send(OutputEvent::Output {
+                    seq: seq_value,
+                    data: format!(
+                        "{{\"execution_id\":{},\"chunk\":{},\"seq\":{},\"ts\":\"{}\"}}",
+                        execution_id,
+                        serde_json::to_string(&chunk).unwrap_or_else(|_| "\"\"".to_string()),
+                        seq_value,
+                        &now
+                    ),
+                });
+            } else if chunks_count.load(Ordering::Relaxed) == max_chunks + 1 {
+                if let Ok(conn) = state_clone.db.get() {
+                    let _ = conn.execute(
+                        "INSERT INTO output_chunks (execution_id, seq, chunk, created_at) VALUES (?1, ?2, ?3, ?4)",
+                        params![execution_id, seq_value + 1, "\n\n[OUTPUT TRUNCATED - LIMIT EXCEEDED]\n", now],
+                    );
+                }
+            }
+        };
 
         loop {
             tokio::select! {
-                line = lines.next_line() => {
+                line = stdout_lines.next_line(), if !stdout_done => {
                     match line {
-                        Ok(Some(line)) => {
-                            seq += 1;
-                            let now = Utc::now().to_rfc3339();
-
-                            // Store chunk in DB with limit
-                            if chunks_count < max_chunks {
-                                if let Ok(conn) = state_clone.db.get() {
-                                    let _ = conn.execute(
-                                        "INSERT INTO output_chunks (execution_id, seq, chunk, created_at) VALUES (?1, ?2, ?3, ?4)",
-                                        params![execution_id, seq, line, now],
-                                    );
-                                }
-                                chunks_count += 1;
-
-                                if chunks_count == max_chunks {
-                                    if let Ok(conn) = state_clone.db.get() {
-                                        let _ = conn.execute(
-                                            "INSERT INTO output_chunks (execution_id, seq, chunk, created_at) VALUES (?1, ?2, ?3, ?4)",
-                                            params![execution_id, seq + 1, "\n\n[OUTPUT TRUNCATED - LIMIT EXCEEDED]\n", now],
-                                        );
-                                    }
-                                }
-                            }
-
-                            // Broadcast to SSE listeners
-                            let event = format!(
-                                "{{\"execution_id\":{},\"chunk\":{},\"seq\":{},\"ts\":\"{}\"}}",
-                                execution_id,
-                                serde_json::to_string(&line).unwrap_or_else(|_| "\"\"".to_string()),
-                                seq,
-                                now
-                            );
-                            let _ = output_tx_clone.send(event);
-                        }
-                        Ok(None) => break, // EOF
-                        Err(_) => break,
+                        Ok(Some(line)) => emit_chunk(line, false, &seq, &chunks_count),
+                        Ok(None) => stdout_done = true,
+                        Err(_) => stdout_done = true,
+                    }
+                }
+                line = stderr_lines.next_line(), if !stderr_done => {
+                    match line {
+                        Ok(Some(line)) => emit_chunk(line, true, &seq, &chunks_count),
+                        Ok(None) => stderr_done = true,
+                        Err(_) => stderr_done = true,
                     }
                 }
                 _ = cancel_rx.recv() => {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     cancelled = true;
+                    let status_event = format!(
+                        "{{\"execution_id\":{},\"status\":\"cancelled\"}}",
+                        execution_id
+                    );
+                    let _ = output_tx_clone.send(OutputEvent::Status(status_event));
                     break;
                 }
+            }
+
+            if stdout_done && stderr_done {
+                break;
             }
         }
 
@@ -154,7 +180,7 @@ pub async fn spawn_execution(
                 "{{\"execution_id\":{},\"status\":\"{}\",\"exit_code\":{}}}",
                 execution_id, status, exit_code
             );
-            let _ = output_tx_clone.send(format!("STATUS:{}", status_event));
+            let _ = output_tx_clone.send(OutputEvent::Status(status_event));
         }
 
         // Remove from running map
@@ -273,16 +299,21 @@ pub async fn stream_execution(
 
         if let Some(mut rx) = live_rx {
             // Stream live chunks until process finishes
-            while let Ok(event) = rx.recv().await {
-                if event.starts_with("STATUS:") {
-                    let status_event = format!("event:status\ndata:{}\n\n", &event[7..]);
-                    let _ = tx_clone.send(Ok(Bytes::from(status_event))).await;
-                    break;
-                }
-
-                let sse_event = format!("event:output\ndata:{}\n\n", event);
-                if tx_clone.send(Ok(Bytes::from(sse_event))).await.is_err() {
-                    break;
+            loop {
+                match rx.recv().await {
+                    Ok(OutputEvent::Status(status)) => {
+                        let status_event = format!("event:status\ndata:{}\n\n", status);
+                        let _ = tx_clone.send(Ok(Bytes::from(status_event))).await;
+                        break;
+                    }
+                    Ok(OutputEvent::Output { seq, data }) => {
+                        let sse_event = format!("id:{}\nevent:output\ndata:{}\n\n", seq, data);
+                        if tx_clone.send(Ok(Bytes::from(sse_event))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         } else {

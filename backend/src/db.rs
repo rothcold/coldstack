@@ -2,7 +2,6 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::adapters::AdapterRegistry;
@@ -10,9 +9,14 @@ use crate::adapters::AdapterRegistry;
 pub type DbPool = Pool<SqliteConnectionManager>;
 
 pub struct RunningExecution {
-    pub child_id: u32,
     pub cancel_tx: broadcast::Sender<()>,
-    pub output_tx: broadcast::Sender<String>,
+    pub output_tx: broadcast::Sender<OutputEvent>,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutputEvent {
+    Output { seq: i64, data: String },
+    Status(String),
 }
 
 pub struct AppState {
@@ -30,9 +34,6 @@ impl AppState {
         }
     }
 }
-
-pub type SharedState = Arc<AppState>;
-
 pub fn create_pool(path: &str) -> Result<DbPool, r2d2::Error> {
     let manager = SqliteConnectionManager::file(path).with_init(|conn| {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -59,8 +60,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             task_id TEXT NOT NULL UNIQUE,
             title TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
-            completed INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'Pending',
+            archived INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'Plan',
             assignee TEXT,
             created_at TEXT NOT NULL
         )",
@@ -88,13 +89,36 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     if !columns.contains(&"status".to_string()) {
         conn.execute(
-            "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'Pending'",
+            "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'Plan'",
+            [],
+        )?;
+    }
+    if !columns.contains(&"archived".to_string()) {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
     if !columns.contains(&"assignee".to_string()) {
         conn.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT", [])?;
     }
+    if columns.contains(&"completed".to_string()) {
+        conn.execute(
+            "UPDATE tasks SET archived = completed WHERE archived = 0 AND completed != 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "UPDATE tasks
+         SET status = CASE status
+             WHEN 'Pending' THEN 'Plan'
+             WHEN 'Doing' THEN 'Coding'
+             WHEN 'Finished' THEN 'Review'
+             WHEN 'Reviewing' THEN 'Review'
+             ELSE status
+         END",
+        [],
+    )?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS subtasks (
@@ -144,6 +168,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             role TEXT NOT NULL,
+            workflow_role TEXT NOT NULL DEFAULT 'planner',
             department TEXT NOT NULL,
             agent_backend TEXT NOT NULL,
             system_prompt TEXT,
@@ -179,6 +204,35 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("ALTER TABLE task_executions ADD COLUMN pid INTEGER", [])?;
     }
 
+    let mut stmt = conn.prepare("PRAGMA table_info(ai_employees)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if !columns.contains(&"workflow_role".to_string()) {
+        conn.execute(
+            "ALTER TABLE ai_employees ADD COLUMN workflow_role TEXT NOT NULL DEFAULT 'planner'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "UPDATE ai_employees
+         SET workflow_role = CASE LOWER(role)
+             WHEN 'planner' THEN 'planner'
+             WHEN 'design' THEN 'designer'
+             WHEN 'designer' THEN 'designer'
+             WHEN 'coding' THEN 'coder'
+             WHEN 'coder' THEN 'coder'
+             WHEN 'developer' THEN 'coder'
+             WHEN 'review' THEN 'reviewer'
+             WHEN 'reviewer' THEN 'reviewer'
+             WHEN 'qa' THEN 'qa'
+             WHEN 'human' THEN 'human'
+             ELSE workflow_role
+         END",
+        [],
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS output_chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -203,6 +257,28 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_task_executions_employee_id ON task_executions(employee_id)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_workflow_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            from_status TEXT NOT NULL,
+            to_status TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id INTEGER,
+            actor_label TEXT NOT NULL,
+            action TEXT NOT NULL,
+            note TEXT,
+            evidence_text TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_workflow_events_task_created_at ON task_workflow_events(task_id, created_at)",
         [],
     )?;
 
@@ -270,9 +346,9 @@ pub fn seed_employees(conn: &Connection) -> rusqlite::Result<()> {
 
     let employees = [
         ("Alice", "Senior Frontend Engineer", "Frontend", "claude_code", "You are Alice, a senior frontend engineer. You specialize in React, TypeScript, and CSS. Write clean, accessible UI code."),
-        ("Bob", "Backend Architect", "Backend", "gemini_cli", "You are Bob, a backend architect. You specialize in API design, database optimization, and system architecture."),
-        ("Carol", "Quality Assurance Lead", "QA", "codex", "You are Carol, a QA lead. You write thorough test suites, find edge cases, and verify correctness."),
-        ("Dave", "Infrastructure Engineer", "DevOps", "cursor", "You are Dave, an infrastructure engineer. You handle CI/CD, Docker, deployment, and monitoring."),
+        ("Bob", "Backend Architect", "Backend", "claude_code", "You are Bob, a backend architect. You specialize in API design, database optimization, and system architecture."),
+        ("Carol", "Quality Assurance Lead", "QA", "claude_code", "You are Carol, a QA lead. You write thorough test suites, find edge cases, and verify correctness."),
+        ("Dave", "Infrastructure Engineer", "DevOps", "claude_code", "You are Dave, an infrastructure engineer. You handle CI/CD, Docker, deployment, and monitoring."),
         ("Eve", "Technical Writer", "Documentation", "claude_code", "You are Eve, a technical writer. You write clear documentation, API guides, and README files."),
     ];
 
