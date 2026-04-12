@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
+import { subscribeExecution } from '../lib/executionStream'
 
 interface LiveTerminalProps {
   executionId: number
@@ -6,35 +7,24 @@ interface LiveTerminalProps {
 
 export default function LiveTerminal({ executionId }: LiveTerminalProps) {
   const [output, setOutput] = useState<string>('')
+  const [streamStatus, setStreamStatus] = useState<string>('running')
   const terminalRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    setOutput('') // Reset output when execution changes
-    
-    // Load historical output first
-    fetch(`/api/executions/${executionId}/output`)
-      .then(res => res.json())
-      .then(chunks => {
-        const text = chunks.map((c: any) => c.chunk).join('')
-        setOutput(text)
-      })
-      .catch(err => console.error('Failed to load execution output', err))
+    setOutput('')
+    setStreamStatus('running')
 
-    // Stream new output via SSE
-    const eventSource = new EventSource(`/api/executions/${executionId}/stream`)
-    
-    eventSource.onmessage = (e) => {
-      setOutput(prev => prev + e.data)
-    }
-    
-    eventSource.onerror = () => {
-      // It's normal for SSE to close when execution is complete
-      eventSource.close()
-    }
-
-    return () => {
-      eventSource.close()
-    }
+    return subscribeExecution(executionId, {
+      onOutput: (event) => {
+        setOutput((prev) => prev + event.chunk + '\n')
+      },
+      onStatus: (event) => {
+        setStreamStatus(event.status)
+      },
+      onError: () => {
+        setStreamStatus('failed')
+      },
+    })
   }, [executionId])
 
   // Auto-scroll
@@ -65,7 +55,7 @@ export default function LiveTerminal({ executionId }: LiveTerminalProps) {
         wordBreak: 'break-all'
       }}
     >
-      {output || 'Waiting for output...'}
+      {output || (streamStatus === 'running' ? 'Waiting for output...' : `Execution ${streamStatus}.`)}
     </div>
   )
 }

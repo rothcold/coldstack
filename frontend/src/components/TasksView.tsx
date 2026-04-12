@@ -1,474 +1,556 @@
-import { useState, useEffect } from 'react'
-import type { Task, Subtask, TaskStatus, Agent } from '../types'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type {
+  BoardTaskSummary,
+  CreateTaskPayload,
+  Employee,
+  TaskDetail,
+  TransitionPayload,
+  UpdateTaskPayload,
+  WorkflowBoardGroup,
+} from '../types'
+import Modal from './Modal'
+import RejectModal from './RejectModal'
+import TaskDetailTimeline from './TaskDetailTimeline'
+import TransitionActions from './TransitionActions'
+import WorkflowBoard from './WorkflowBoard'
 
-export default function TasksView() {
-  const [tasks, setTasks] = useState<Task[]>([])
-  const [agents, setAgents] = useState<Agent[]>([])
-  
-  const [newTaskId, setNewTaskId] = useState('')
-  const [newTitle, setNewTitle] = useState('')
-  const [newDesc, setNewDesc] = useState('')
-  const [newAssignee, setNewAssignee] = useState('')
-  const [editingId, setEditingId] = useState<number | null>(null)
-  const [editTaskId, setEditTaskId] = useState('')
-  const [editTitle, setEditTitle] = useState('')
-  const [editDesc, setEditDesc] = useState('')
-  const [editStatus, setEditStatus] = useState<TaskStatus>('Pending')
-  const [editAssignee, setEditAssignee] = useState('')
-  const [newSubtaskTitle, setNewSubtaskTitle] = useState<{ [key: number]: string }>({})
-  const [newSubtaskAssignee, setNewSubtaskAssignee] = useState<{ [key: number]: string }>({})
-  const [editingSubtaskId, setEditingSubtaskId] = useState<number | null>(null)
-  const [editSubtaskTitle, setEditSubtaskTitle] = useState('')
-  const [editSubtaskStatus, setEditSubtaskStatus] = useState<TaskStatus>('Pending')
-  const [editSubtaskAssignee, setEditSubtaskAssignee] = useState('')
+type TaskFormState = {
+  task_id: string
+  title: string
+  description: string
+  assignee: string
+}
 
-  const API_URL = '/api'
+const EMPTY_FORM: TaskFormState = {
+  task_id: '',
+  title: '',
+  description: '',
+  assignee: '',
+}
 
-  const fetchTasks = async () => {
-    try {
-      const res = await fetch(`${API_URL}/tasks`)
-      const data = await res.json()
-      setTasks(data)
-    } catch (err) {
-      console.error('Failed to fetch tasks:', err)
-    }
+const GROUP_ORDER: WorkflowBoardGroup[] = ['Plan', 'Build', 'Review', 'QA', 'Human', 'Done']
+
+function sortGroupTasks(tasks: BoardTaskSummary[]) {
+  return [...tasks].sort((left, right) => {
+    const leftRank = Number(left.waiting_for_human) * 2 + Number(left.needs_attention)
+    const rightRank = Number(right.waiting_for_human) * 2 + Number(right.needs_attention)
+    if (leftRank !== rightRank) return rightRank - leftRank
+    return left.task_id.localeCompare(right.task_id)
+  })
+}
+
+function mapBoardGroups(tasks: BoardTaskSummary[]) {
+  const groups = {
+    Plan: [] as BoardTaskSummary[],
+    Build: [] as BoardTaskSummary[],
+    Review: [] as BoardTaskSummary[],
+    QA: [] as BoardTaskSummary[],
+    Human: [] as BoardTaskSummary[],
+    Done: [] as BoardTaskSummary[],
   }
 
-  const fetchAgents = async () => {
-    try {
-      const res = await fetch(`${API_URL}/agents`)
-      const data = await res.json()
-      setAgents(data)
-    } catch (err) {
-      console.error('Failed to fetch agents:', err)
-    }
+  tasks.forEach((task) => {
+    groups[task.board_group].push(task)
+  })
+
+  return {
+    Plan: sortGroupTasks(groups.Plan),
+    Build: sortGroupTasks(groups.Build),
+    Review: sortGroupTasks(groups.Review),
+    QA: sortGroupTasks(groups.QA),
+    Human: sortGroupTasks(groups.Human),
+    Done: sortGroupTasks(groups.Done),
+  }
+}
+
+export default function TasksView() {
+  const [tasks, setTasks] = useState<BoardTaskSummary[]>([])
+  const [employees, setEmployees] = useState<Employee[]>([])
+  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null)
+  const [selectedTask, setSelectedTask] = useState<TaskDetail | null>(null)
+  const [isCompact, setIsCompact] = useState(() => window.innerWidth < 960)
+  const [activeGroup, setActiveGroup] = useState<WorkflowBoardGroup>('Human')
+  const [actorKey, setActorKey] = useState('')
+
+  const [modalOpen, setModalOpen] = useState(false)
+  const [editingDetail, setEditingDetail] = useState<TaskDetail | null>(null)
+  const [form, setForm] = useState<TaskFormState>(EMPTY_FORM)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const [rejectPayload, setRejectPayload] = useState<TransitionPayload | null>(null)
+  const detailPanelRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const onResize = () => setIsCompact(window.innerWidth < 960)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  const fetchTasks = async () => {
+    const response = await fetch('/api/tasks')
+    const data = await response.json()
+    setTasks(data)
+  }
+
+  const fetchEmployees = async () => {
+    const response = await fetch('/api/employees')
+    const data = await response.json()
+    setEmployees(data)
+  }
+
+  const fetchTaskDetail = async (taskId: number) => {
+    const response = await fetch(`/api/tasks/${taskId}`)
+    const data = await response.json()
+    setSelectedTask(data)
   }
 
   useEffect(() => {
-    fetchTasks()
-    fetchAgents()
+    void fetchTasks()
+    void fetchEmployees()
   }, [])
 
-  const handleAdd = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!newTitle.trim() || !newTaskId.trim()) {
-      alert('Title and Task ID are required')
+  useEffect(() => {
+    if (selectedTaskId == null) {
+      setSelectedTask(null)
+      return
+    }
+    void fetchTaskDetail(selectedTaskId)
+  }, [selectedTaskId])
+
+  useEffect(() => {
+    if (employees.length > 0 && !actorKey) {
+      setActorKey(`employee:${employees[0].id}`)
+    }
+  }, [employees, actorKey])
+
+  useEffect(() => {
+    if (!isCompact && selectedTask) {
+      detailPanelRef.current?.focus()
+    }
+  }, [isCompact, selectedTask])
+
+  const groupedTasks = useMemo(() => mapBoardGroups(tasks), [tasks])
+  const visibleTaskCount = GROUP_ORDER.reduce((count, group) => count + groupedTasks[group].length, 0)
+  const attentionCount = tasks.filter((task) => task.needs_attention || task.waiting_for_human).length
+
+  const openCreate = () => {
+    setEditingDetail(null)
+    setForm(EMPTY_FORM)
+    setError(null)
+    setModalOpen(true)
+  }
+
+  const openEdit = () => {
+    if (!selectedTask) return
+    setEditingDetail(selectedTask)
+    setForm({
+      task_id: selectedTask.task.task_id,
+      title: selectedTask.task.title,
+      description: selectedTask.task.description,
+      assignee: selectedTask.task.assignee ?? '',
+    })
+    setError(null)
+    setModalOpen(true)
+  }
+
+  const closeDetail = () => {
+    setSelectedTaskId(null)
+    setSelectedTask(null)
+  }
+
+  const handleTaskSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!form.task_id.trim() || !form.title.trim()) {
+      setError('Task ID and title are required.')
       return
     }
 
+    setSaving(true)
+    setError(null)
     try {
-      const res = await fetch(`${API_URL}/tasks`, {
-        method: 'POST',
+      const payload: CreateTaskPayload | UpdateTaskPayload = editingDetail
+        ? {
+            task_id: form.task_id.trim(),
+            title: form.title.trim(),
+            description: form.description.trim(),
+            assignee: form.assignee || null,
+          }
+        : {
+            task_id: form.task_id.trim(),
+            title: form.title.trim(),
+            description: form.description.trim(),
+            assignee: form.assignee || null,
+          }
+
+      const response = await fetch(editingDetail ? `/api/tasks/${editingDetail.task.id}` : '/api/tasks', {
+        method: editingDetail ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          task_id: newTaskId,
-          title: newTitle, 
-          description: newDesc,
-          assignee: newAssignee || null
-        }),
+        body: JSON.stringify(payload),
       })
-      if (res.ok) {
-        setNewTaskId('')
-        setNewTitle('')
-        setNewDesc('')
-        setNewAssignee('')
-        fetchTasks()
-      } else if (res.status === 409) {
-        alert('Task ID already exists')
+
+      if (response.status === 409) {
+        setError('Task ID already exists.')
+        return
       }
-    } catch (err) {
-      console.error('Failed to add task:', err)
-    }
-  }
-
-  const handleToggle = async (task: Task) => {
-    try {
-      await fetch(`${API_URL}/tasks/${task.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ completed: !task.completed }),
-      })
-      fetchTasks()
-    } catch (err) {
-      console.error('Failed to update task:', err)
-    }
-  }
-
-  const handleDelete = async (id: number) => {
-    try {
-      await fetch(`${API_URL}/tasks/${id}`, {
-        method: 'DELETE',
-      })
-      fetchTasks()
-    } catch (err) {
-      console.error('Failed to delete task:', err)
-    }
-  }
-
-  const startEdit = (task: Task) => {
-    setEditingId(task.id)
-    setEditTaskId(task.task_id as string)
-    setEditTitle(task.title as string)
-    setEditDesc(task.description as string)
-    setEditStatus(task.status)
-    setEditAssignee((task.assignee as string) || '')
-  }
-
-  const handleSaveEdit = async (id: number) => {
-    try {
-      const res = await fetch(`${API_URL}/tasks/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          task_id: editTaskId,
-          title: editTitle, 
-          description: editDesc, 
-          status: editStatus,
-          assignee: editAssignee || null
-        }),
-      })
-      if (res.ok) {
-        setEditingId(null)
-        fetchTasks()
-      } else if (res.status === 409) {
-        alert('Task ID already exists')
+      if (!response.ok) {
+        throw new Error(await response.text())
       }
-    } catch (err) {
-      console.error('Failed to save edit:', err)
-    }
-  }
 
-  const handleAddSubtask = async (taskId: number) => {
-    const title = newSubtaskTitle[taskId]
-    const assignee = newSubtaskAssignee[taskId]
-    if (!title || !title.trim()) return
-
-    try {
-      const res = await fetch(`${API_URL}/tasks/${taskId}/subtasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, assignee: assignee || null }),
-      })
-      if (res.ok) {
-        setNewSubtaskTitle(prev => ({ ...prev, [taskId]: '' }))
-        setNewSubtaskAssignee(prev => ({ ...prev, [taskId]: '' }))
-        fetchTasks()
+      const task = await response.json()
+      setModalOpen(false)
+      await fetchTasks()
+      if (editingDetail) {
+        setSelectedTaskId(task.id)
       }
-    } catch (err) {
-      console.error('Failed to add subtask:', err)
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Failed to save task')
+    } finally {
+      setSaving(false)
     }
   }
 
-  const handleToggleSubtask = async (taskId: number, subtaskId: number) => {
-    try {
-      await fetch(`${API_URL}/tasks/${taskId}/subtasks/${subtaskId}/toggle`, {
-        method: 'POST',
-      })
-      fetchTasks()
-    } catch (err) {
-      console.error('Failed to toggle subtask:', err)
+  const handleDelete = async () => {
+    if (!selectedTask) return
+    if (!window.confirm(`Delete ${selectedTask.task.task_id}?`)) return
+
+    await fetch(`/api/tasks/${selectedTask.task.id}`, { method: 'DELETE' })
+    closeDetail()
+    await fetchTasks()
+  }
+
+  const handleTransition = async (payload: TransitionPayload) => {
+    if (!selectedTask) return
+
+    const response = await fetch(`/api/tasks/${selectedTask.task.id}/transition`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+
+    if (!response.ok) {
+      const message = await response.text()
+      window.alert(message || 'Transition failed')
+      return
     }
-  }
 
-  const startSubtaskEdit = (sub: Subtask) => {
-    setEditingSubtaskId(sub.id)
-    setEditSubtaskTitle(sub.title)
-    setEditSubtaskStatus(sub.status)
-    setEditSubtaskAssignee(sub.assignee || '')
-  }
-
-  const handleSaveSubtaskEdit = async (taskId: number, subtaskId: number) => {
-    try {
-      await fetch(`${API_URL}/tasks/${taskId}/subtasks/${subtaskId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          title: editSubtaskTitle, 
-          status: editSubtaskStatus,
-          assignee: editSubtaskAssignee || null
-        }),
-      })
-      setEditingSubtaskId(null)
-      fetchTasks()
-    } catch (err) {
-      console.error('Failed to save subtask edit:', err)
-    }
-  }
-
-  const handleCancelEdit = () => {
-    setEditingId(null)
-    setEditTitle('')
-    setEditDesc('')
-    setEditAssignee('')
+    const data = await response.json()
+    setSelectedTask(data.task)
+    await fetchTasks()
   }
 
   return (
-    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '2rem' }}>
-      <h1 style={{ fontSize: '1.5rem', fontWeight: 'bold', margin: '0 0 1.5rem' }}>Tasks</h1>
-      
-      <form onSubmit={handleAdd} style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', background: 'var(--bg-primary)', padding: '1rem', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)' }}>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <input
-            type="text"
-            placeholder="Task ID (e.g. TASK-1)"
-            value={newTaskId}
-            onChange={(e) => setNewTaskId(e.target.value)}
-            style={{ width: '120px', padding: '0.5rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-          />
-          <input
-            type="text"
-            placeholder="Task title"
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            style={{ flex: 1, padding: '0.5rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-          />
-          <select
-            value={newAssignee}
-            onChange={(e) => setNewAssignee(e.target.value)}
-            style={{ flex: 1, padding: '0.5rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-          >
-            <option value="">No assignee</option>
-            {agents.map(a => <option key={a.id} value={a.name}>{a.name} ({a.cli})</option>)}
-          </select>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', minHeight: 0 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ fontSize: '1.7rem', fontWeight: 750, letterSpacing: '-0.03em' }}>Workflow board</h1>
+          <div style={{ marginTop: '0.3rem', color: 'var(--text-secondary)', maxWidth: 640 }}>
+            Track one disciplined relay from planning through QA, surface returned work first, and keep human decisions explicit.
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <input
-            type="text"
-            placeholder="Description (optional)"
-            value={newDesc}
-            onChange={(e) => setNewDesc(e.target.value)}
-            style={{ flex: 1, padding: '0.5rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-          />
-          <button
-            type="submit"
-            style={{ padding: '0.5rem 1rem', background: 'var(--accent-primary)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}
-          >
-            Add
-          </button>
-        </div>
-      </form>
+        <button
+          type="button"
+          onClick={openCreate}
+          style={{ background: 'var(--accent-primary)', color: 'white', border: 'none', minHeight: 44 }}
+        >
+          Create workflow task
+        </button>
+      </div>
 
-      <ul style={{ listStyle: 'none', padding: 0, margin: 0, background: 'var(--bg-primary)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)', overflow: 'hidden' }}>
-        {tasks.map((task, idx) => (
-          <li
-            key={task.id}
-            style={{
-              padding: '1rem',
-              borderBottom: idx === tasks.length - 1 ? 'none' : '1px solid var(--border-color)',
-              background: editingId === task.id ? 'var(--bg-tertiary)' : 'transparent',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '0.75rem',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
-              <input
-                type="checkbox"
-                checked={task.completed}
-                onChange={() => handleToggle(task)}
-                style={{ width: '1.2rem', height: '1.2rem', marginTop: '0.2rem' }}
-              />
+      <div style={{ display: 'grid', gridTemplateColumns: isCompact ? '1fr' : '1.8fr minmax(320px, 0.95fr)', gap: '1rem', minHeight: 0 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', minWidth: 0 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem' }}>
+            <MetricCard label="Active tasks" value={String(visibleTaskCount)} helper="Board summaries only" />
+            <MetricCard label="Needs attention" value={String(attentionCount)} helper="Returned + waiting human" accent="rgb(180, 83, 9)" />
+            <MetricCard label="Active lanes" value="6" helper="Plan, Build, Review, QA, Human, Done" />
+          </div>
 
-              {editingId === task.id ? (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <input
-                      type="text"
-                      value={editTaskId}
-                      onChange={(e) => setEditTaskId(e.target.value)}
-                      style={{ width: '100px', padding: '0.4rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-                      placeholder="ID"
-                    />
-                    <input
-                      type="text"
-                      value={editTitle}
-                      onChange={(e) => setEditTitle(e.target.value)}
-                      style={{ flex: 1, padding: '0.4rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-                      placeholder="Title"
-                    />
-                    <select
-                      value={editAssignee}
-                      onChange={(e) => setEditAssignee(e.target.value)}
-                      style={{ flex: 1, padding: '0.4rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-                    >
-                      <option value="">No assignee</option>
-                      {agents.map(a => <option key={a.id} value={a.name}>{a.name} ({a.cli})</option>)}
-                    </select>
-                  </div>
-                  <textarea
-                    value={editDesc}
-                    onChange={(e) => setEditDesc(e.target.value)}
-                    style={{ padding: '0.4rem', fontSize: '0.875rem', color: 'var(--text-secondary)', minHeight: '3rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-                    placeholder="Description"
-                  />
-                  <select
-                    value={editStatus}
-                    onChange={(e) => setEditStatus(e.target.value as TaskStatus)}
-                    style={{ padding: '0.4rem', fontSize: '0.875rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-                  >
-                    <option value="Pending">Pending</option>
-                    <option value="Doing">Doing</option>
-                    <option value="Finished">Finished</option>
-                    <option value="Reviewing">Reviewing</option>
-                    <option value="Done">Done</option>
-                  </select>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button
-                      onClick={() => handleSaveEdit(task.id)}
-                      style={{ padding: '0.4rem 0.8rem', background: 'var(--status-working)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}
-                    >
-                      Save
-                    </button>
-                    <button
-                      onClick={handleCancelEdit}
-                      style={{ padding: '0.4rem 0.8rem', background: 'var(--text-tertiary)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span style={{ fontSize: '0.75rem', fontWeight: 'bold', color: 'var(--text-secondary)' }}>{task.task_id as string}</span>
-                      <div style={{ fontWeight: task.completed ? 'normal' : '500', textDecoration: task.completed ? 'line-through' : 'none', color: task.completed ? 'var(--text-tertiary)' : 'var(--text-primary)' }}>
-                        {task.title as string}
-                      </div>
-                      <span style={{ fontSize: '0.7rem', padding: '0.1rem 0.4rem', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-full)', color: 'var(--text-secondary)' }}>
-                        {task.status}
-                      </span>
-                      {task.assignee && (
-                        <span style={{ fontSize: '0.7rem', color: 'var(--accent-primary)' }}>
-                          @{task.assignee}
-                        </span>
-                      )}
-                    </div>
-                    {task.description && (
-                      <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                        {task.description}
-                      </div>
-                    )}
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', marginTop: '0.25rem' }}>
-                      {new Date(task.created_at).toLocaleString()}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button
-                      onClick={() => startEdit(task)}
-                      style={{ padding: '0.25rem 0.5rem', background: 'var(--status-reviewing)', color: 'white', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '0.75rem' }}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => handleDelete(task.id)}
-                      style={{ padding: '0.25rem 0.5rem', background: 'var(--status-offline)', color: 'white', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '0.75rem' }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* Subtasks Section */}
-            {!editingId && (
-              <div style={{ marginLeft: '2rem', padding: '0.5rem', borderLeft: '2px solid var(--border-color)' }}>
-                <div style={{ fontSize: '0.8rem', fontWeight: 'bold', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>Subtasks</div>
-                <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 0.5rem 0' }}>
-                  {task.subtasks.map(sub => (
-                    <li key={sub.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', marginBottom: '0.5rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.875rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={sub.completed}
-                          onChange={() => handleToggleSubtask(task.id, sub.id)}
-                        />
-                        {editingSubtaskId === sub.id ? (
-                          <div style={{ flex: 1, display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
-                            <input
-                              type="text"
-                              value={editSubtaskTitle}
-                              onChange={(e) => setEditSubtaskTitle(e.target.value)}
-                              style={{ flex: 1, padding: '0.1rem', fontSize: '0.8rem', border: '1px solid var(--border-color)' }}
-                            />
-                            <input
-                              type="text"
-                              value={editSubtaskAssignee}
-                              onChange={(e) => setEditSubtaskAssignee(e.target.value)}
-                              style={{ width: '80px', padding: '0.1rem', fontSize: '0.8rem', border: '1px solid var(--border-color)' }}
-                              placeholder="Assignee"
-                            />
-                            <select
-                              value={editSubtaskStatus}
-                              onChange={(e) => setEditSubtaskStatus(e.target.value as TaskStatus)}
-                              style={{ padding: '0.1rem', fontSize: '0.7rem', border: '1px solid var(--border-color)' }}
-                            >
-                              <option value="Pending">Pending</option>
-                              <option value="Doing">Doing</option>
-                              <option value="Finished">Finished</option>
-                              <option value="Reviewing">Reviewing</option>
-                              <option value="Done">Done</option>
-                            </select>
-                            <button onClick={() => handleSaveSubtaskEdit(task.id, sub.id)} style={{ fontSize: '0.7rem', padding: '0.1rem 0.3rem', background: 'var(--status-working)', color: 'white', border: 'none', borderRadius: 'var(--radius-sm)' }}>Save</button>
-                            <button onClick={() => setEditingSubtaskId(null)} style={{ fontSize: '0.7rem', padding: '0.1rem 0.3rem', background: 'var(--text-tertiary)', color: 'white', border: 'none', borderRadius: 'var(--radius-sm)' }}>X</button>
-                          </div>
-                        ) : (
-                          <>
-                            <span style={{ textDecoration: sub.completed ? 'line-through' : 'none', color: sub.completed ? 'var(--text-tertiary)' : 'var(--text-primary)' }}>
-                              {sub.title}
-                            </span>
-                            <span style={{ fontSize: '0.65rem', padding: '0.05rem 0.3rem', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-full)', color: 'var(--text-secondary)' }}>
-                              {sub.status}
-                            </span>
-                            {sub.assignee && (
-                              <span style={{ fontSize: '0.65rem', color: 'var(--accent-primary)' }}>
-                                @{sub.assignee}
-                              </span>
-                            )}
-                            <button
-                              onClick={() => startSubtaskEdit(sub)}
-                              style={{ fontSize: '0.65rem', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', marginLeft: 'auto' }}
-                            >
-                              Edit
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <input
-                    type="text"
-                    placeholder="New subtask title"
-                    value={newSubtaskTitle[task.id] || ''}
-                    onChange={(e) => setNewSubtaskTitle(prev => ({ ...prev, [task.id]: e.target.value }))}
-                    style={{ flex: 2, padding: '0.4rem', fontSize: '0.8rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)' }}
-                  />
-                  <input
-                    type="text"
-                    placeholder="Assignee"
-                    value={newSubtaskAssignee[task.id] || ''}
-                    onChange={(e) => setNewSubtaskAssignee(prev => ({ ...prev, [task.id]: e.target.value }))}
-                    style={{ flex: 1, padding: '0.4rem', fontSize: '0.8rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)' }}
-                  />
-                  <button
-                    onClick={() => handleAddSubtask(task.id)}
-                    style={{ padding: '0.4rem 0.5rem', background: 'var(--status-working)', color: 'white', border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '0.8rem' }}
-                  >
-                    Add
-                  </button>
+          {visibleTaskCount === 0 ? (
+            <div
+              style={{
+                padding: '2rem',
+                background: 'var(--surface-elevated)',
+                borderRadius: 'var(--radius-xl)',
+                border: '1px dashed var(--border-color)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1rem',
+                boxShadow: '0 18px 40px -28px rgba(6, 148, 148, 0.45)',
+              }}
+            >
+              <div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700 }}>Start the first relay</div>
+                <div style={{ marginTop: '0.35rem', color: 'var(--text-secondary)', maxWidth: 640 }}>
+                  This board is not a generic backlog. Work moves through Plan, Build, Review, QA, and a final human decision before it leaves the active workspace.
                 </div>
               </div>
-            )}
-          </li>
-        ))}
-      </ul>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
+                <button
+                  type="button"
+                  onClick={openCreate}
+                  style={{
+                    background: 'linear-gradient(180deg, var(--accent-primary), var(--accent-hover))',
+                    color: 'var(--accent-contrast)',
+                    border: '1px solid color-mix(in srgb, var(--accent-primary) 80%, black 20%)',
+                    minHeight: 44,
+                    boxShadow: '0 12px 26px -18px rgba(6, 148, 148, 0.9)',
+                  }}
+                >
+                  Create your first workflow task
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveGroup('Human')}
+                  style={{
+                    background: 'var(--button-secondary-bg)',
+                    color: 'var(--button-secondary-color)',
+                    border: '1px solid var(--button-secondary-border)',
+                    minHeight: 44,
+                  }}
+                >
+                  Open example workflow lane
+                </button>
+              </div>
+              <div style={{ fontSize: '0.84rem', color: 'var(--text-tertiary)' }}>
+                Review and QA can return work upstream. Only a human can archive finished work.
+              </div>
+            </div>
+          ) : (
+            <WorkflowBoard
+              groups={groupedTasks}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={setSelectedTaskId}
+              compact={isCompact}
+              activeGroup={activeGroup}
+              onActiveGroupChange={setActiveGroup}
+            />
+          )}
+        </div>
 
-      {tasks.length === 0 && (
-        <p style={{ textAlign: 'center', color: 'var(--text-tertiary)', marginTop: '2rem' }}>No tasks yet. Add one above!</p>
+        {!isCompact && (
+          <div ref={detailPanelRef} tabIndex={-1} style={{ minWidth: 0, outline: 'none' }}>
+            <TaskDetailShell
+              detail={selectedTask}
+              employees={employees}
+              actorKey={actorKey}
+              onActorKeyChange={setActorKey}
+              onEdit={openEdit}
+              onDelete={handleDelete}
+              onClose={closeDetail}
+              onTransition={handleTransition}
+              onReject={setRejectPayload}
+            />
+          </div>
+        )}
+      </div>
+
+      {isCompact && selectedTask && (
+        <Modal open={Boolean(selectedTask)} title={selectedTask.task.title} onClose={closeDetail} width="100%">
+          <TaskDetailShell
+            detail={selectedTask}
+            employees={employees}
+            actorKey={actorKey}
+            onActorKeyChange={setActorKey}
+            onEdit={openEdit}
+            onDelete={handleDelete}
+            onClose={closeDetail}
+            onTransition={handleTransition}
+            onReject={setRejectPayload}
+            compact
+          />
+        </Modal>
       )}
+
+      <Modal
+        open={modalOpen}
+        title={editingDetail ? 'Edit workflow task' : 'Create workflow task'}
+        onClose={() => setModalOpen(false)}
+        width={640}
+      >
+        <form onSubmit={handleTaskSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <Field label="Task ID">
+            <input autoFocus value={form.task_id} onChange={(event) => setForm((current) => ({ ...current, task_id: event.target.value }))} />
+          </Field>
+          <Field label="Title">
+            <input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} />
+          </Field>
+          <Field label="Description">
+            <textarea
+              value={form.description}
+              onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
+              rows={5}
+              style={{ resize: 'vertical', minHeight: '8rem' }}
+            />
+          </Field>
+          <Field label="Owner">
+            <select value={form.assignee} onChange={(event) => setForm((current) => ({ ...current, assignee: event.target.value }))}>
+              <option value="">Unassigned</option>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.name}>
+                  {employee.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {error && (
+            <div style={{ padding: '0.75rem', borderRadius: 'var(--radius-md)', background: 'rgba(239,68,68,0.08)', color: 'rgb(185, 28, 28)' }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem' }}>
+            <button type="button" onClick={() => setModalOpen(false)} style={{ background: 'transparent', border: '1px solid var(--border-color)' }}>
+              Cancel
+            </button>
+            <button type="submit" disabled={saving} style={{ background: 'var(--accent-primary)', color: 'white', border: 'none', minHeight: 44 }}>
+              {saving ? 'Saving…' : editingDetail ? 'Save changes' : 'Create task'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <RejectModal
+        open={Boolean(rejectPayload)}
+        payload={rejectPayload}
+        onClose={() => setRejectPayload(null)}
+        onSubmit={(payload) => void handleTransition(payload)}
+      />
     </div>
+  )
+}
+
+function MetricCard({ label, value, helper, accent }: { label: string; value: string; helper: string; accent?: string }) {
+  return (
+    <div
+      style={{
+        padding: '1rem',
+        borderRadius: 'var(--radius-xl)',
+        background: 'var(--bg-primary)',
+        border: '1px solid var(--border-color)',
+      }}
+    >
+      <div style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>{label}</div>
+      <div style={{ marginTop: '0.35rem', fontSize: '1.6rem', fontWeight: 750, color: accent ?? 'var(--text-primary)' }}>{value}</div>
+      <div style={{ marginTop: '0.25rem', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{helper}</div>
+    </div>
+  )
+}
+
+function TaskDetailShell({
+  detail,
+  employees,
+  actorKey,
+  onActorKeyChange,
+  onEdit,
+  onDelete,
+  onClose,
+  onTransition,
+  onReject,
+  compact = false,
+}: {
+  detail: TaskDetail | null
+  employees: Employee[]
+  actorKey: string
+  onActorKeyChange: (value: string) => void
+  onEdit: () => void
+  onDelete: () => void
+  onClose: () => void
+  onTransition: (payload: TransitionPayload) => void
+  onReject: (payload: TransitionPayload) => void
+  compact?: boolean
+}) {
+  if (!detail) {
+    return (
+      <div
+        style={{
+          minHeight: compact ? 'auto' : 540,
+          padding: '1.2rem',
+          borderRadius: 'var(--radius-xl)',
+          background: 'var(--bg-primary)',
+          border: '1px dashed var(--border-color)',
+          color: 'var(--text-tertiary)',
+          display: 'grid',
+          placeItems: 'center',
+          textAlign: 'center',
+        }}
+      >
+        Pick a task to inspect the timeline and run the next transition.
+      </div>
+    )
+  }
+
+  return (
+    <aside
+      aria-label={`${detail.task.title} detail`}
+      style={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '1rem',
+        padding: '1rem',
+        borderRadius: 'var(--radius-xl)',
+        background: 'var(--bg-primary)',
+        border: '1px solid var(--border-color)',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start' }}>
+        <div>
+          <div style={{ fontSize: '0.76rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>
+            {detail.task.task_id}
+          </div>
+          <div style={{ marginTop: '0.35rem', fontSize: '1.15rem', fontWeight: 700 }}>{detail.task.title}</div>
+        </div>
+        <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            onClick={onEdit}
+            style={{ background: 'transparent', color: 'var(--text-primary)', border: '1px solid var(--border-color)', minHeight: 44 }}
+          >
+            Edit
+          </button>
+          <button type="button" onClick={onDelete} style={{ background: 'transparent', color: 'rgb(185, 28, 28)', border: '1px solid rgba(239, 68, 68, 0.2)', minHeight: 44 }}>
+            Delete
+          </button>
+          {compact && (
+            <button
+              type="button"
+              onClick={onClose}
+              style={{ background: 'transparent', color: 'var(--text-primary)', border: '1px solid var(--border-color)', minHeight: 44 }}
+            >
+              Close
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div style={{ fontSize: '0.92rem', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>
+        {detail.task.description || 'No description provided.'}
+      </div>
+
+      <TransitionActions
+        detail={detail}
+        employees={employees}
+        actorKey={actorKey}
+        onActorKeyChange={onActorKeyChange}
+        onSubmit={onTransition}
+        onReject={onReject}
+      />
+
+      <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '1rem', minHeight: 0, overflowY: 'auto' }}>
+        <TaskDetailTimeline detail={detail} />
+      </div>
+    </aside>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+      <span style={{ fontSize: '0.76rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>
+        {label}
+      </span>
+      {children}
+    </label>
   )
 }
