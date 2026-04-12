@@ -64,18 +64,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
             .stdout
             .take()
             .ok_or_else(|| "Failed to capture stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to capture stderr".to_string())?;
 
         Ok(AgentProcess {
             child,
             stdout: BufReader::new(stdout),
+            stderr: BufReader::new(stderr),
         })
     }
 
     fn is_available(&self) -> bool {
         Self::find_claude_binary().is_some()
-    }
-
-    fn backend_name(&self) -> &str {
-        "claude_code"
     }
 }

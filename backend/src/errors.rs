@@ -6,7 +6,9 @@ pub enum AppError {
     Db(rusqlite::Error),
     Pool(r2d2::Error),
     NotFound,
+    BadRequest(String),
     Conflict(String),
+    Forbidden(String),
 }
 
 impl fmt::Display for AppError {
@@ -15,7 +17,9 @@ impl fmt::Display for AppError {
             AppError::Db(e) => write!(f, "Database error: {}", e),
             AppError::Pool(e) => write!(f, "Connection pool error: {}", e),
             AppError::NotFound => write!(f, "Not found"),
+            AppError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            AppError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
         }
     }
 }
@@ -39,7 +43,9 @@ impl AppError {
                 HttpResponse::InternalServerError().finish()
             }
             AppError::NotFound => HttpResponse::NotFound().finish(),
+            AppError::BadRequest(msg) => HttpResponse::BadRequest().body(msg.clone()),
             AppError::Conflict(msg) => HttpResponse::Conflict().body(msg.clone()),
+            AppError::Forbidden(msg) => HttpResponse::Forbidden().body(msg.clone()),
         }
     }
 }

@@ -5,6 +5,7 @@ use rusqlite::params;
 use crate::db::AppState;
 use crate::errors::AppError;
 use crate::models::*;
+use crate::workflow;
 
 fn get_subtasks_for_task(
     conn: &rusqlite::Connection,
@@ -21,7 +22,7 @@ fn get_subtasks_for_task(
                 task_id: row.get(1)?,
                 title: row.get(2)?,
                 completed: row.get::<_, i32>(3)? == 1,
-                status: TaskStatus::from_str(&status_str),
+                status: WorkflowStatus::from_str(&status_str),
                 assignee: row.get(5)?,
             })
         })?
@@ -30,75 +31,120 @@ fn get_subtasks_for_task(
     Ok(subtasks)
 }
 
-pub async fn get_tasks(data: web::Data<AppState>) -> HttpResponse {
-    let result = (|| -> Result<Vec<Task>, AppError> {
-        let conn = data.db.get()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, task_id, title, description, completed, status, assignee, created_at FROM tasks ORDER BY created_at DESC",
-        )?;
-
-        let task_rows: Vec<_> = stmt
-            .query_map([], |row| {
+fn load_task(conn: &rusqlite::Connection, id: i64) -> Result<Task, AppError> {
+    let (task_id, title, description, archived, status_str, assignee, created_at) = conn
+        .query_row(
+            "SELECT task_id, title, description, archived, status, assignee, created_at FROM tasks WHERE id = ?1",
+            params![id],
+            |row| {
                 Ok((
-                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i32>(4)? == 1,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
+                    row.get::<_, i32>(3)? == 1,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
+            other => AppError::Db(other),
+        })?;
+
+    Ok(Task {
+        id,
+        task_id,
+        title,
+        description,
+        archived,
+        status: WorkflowStatus::from_str(&status_str),
+        assignee,
+        created_at,
+        subtasks: get_subtasks_for_task(conn, id)?,
+    })
+}
+
+pub async fn get_tasks(data: web::Data<AppState>) -> HttpResponse {
+    let result = (|| -> Result<Vec<BoardTaskSummary>, AppError> {
+        let conn = data.db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT
+                t.id,
+                t.task_id,
+                t.title,
+                t.status,
+                t.assignee,
+                t.archived,
+                CASE
+                    WHEN t.status = 'Coding' AND (
+                        SELECT e.action
+                        FROM task_workflow_events e
+                        WHERE e.task_id = t.id
+                        ORDER BY e.created_at DESC, e.id DESC
+                        LIMIT 1
+                    ) = 'reject' THEN 1
+                    ELSE 0
+                END AS needs_attention,
+                CASE WHEN t.status = 'NeedsHuman' THEN 1 ELSE 0 END AS waiting_for_human,
+                (
+                    SELECT COUNT(*) FROM task_workflow_events e
+                    WHERE e.task_id = t.id AND e.action = 'reject'
+                ) AS rejection_count,
+                (
+                    SELECT CASE
+                        WHEN e.action = 'reject' THEN COALESCE(e.note, 'Returned for changes')
+                        WHEN e.action = 'archive' THEN 'Archived by human'
+                        ELSE 'Moved to ' || e.to_status
+                    END
+                    FROM task_workflow_events e
+                    WHERE e.task_id = t.id
+                    ORDER BY e.created_at DESC, e.id DESC
+                    LIMIT 1
+                ) AS latest_event_summary
+             FROM tasks t
+             WHERE t.archived = 0
+             ORDER BY t.created_at DESC",
+        )?;
+
+        let tasks = stmt
+            .query_map([], |row| {
+                let status = WorkflowStatus::from_str(&row.get::<_, String>(3)?);
+                Ok(BoardTaskSummary {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    title: row.get(2)?,
+                    status,
+                    board_group: status.board_group().to_string(),
+                    assignee: row.get(4)?,
+                    archived: row.get::<_, i32>(5)? == 1,
+                    needs_attention: row.get::<_, i32>(6)? == 1,
+                    waiting_for_human: row.get::<_, i32>(7)? == 1,
+                    rejection_count: row.get(8)?,
+                    latest_event_summary: row.get(9)?,
+                })
             })?
             .filter_map(|r| r.ok())
             .collect();
 
-        // Fetch all subtasks in one query to avoid N+1
-        let mut sub_stmt = conn.prepare(
-            "SELECT id, task_id, title, completed, status, assignee FROM subtasks",
-        )?;
-        let subtask_rows = sub_stmt.query_map([], |row| {
-            let status_str: String = row.get(4)?;
-            Ok(Subtask {
-                id: row.get(0)?,
-                task_id: row.get(1)?,
-                title: row.get(2)?,
-                completed: row.get::<_, i32>(3)? == 1,
-                status: TaskStatus::from_str(&status_str),
-                assignee: row.get(5)?,
-            })
-        })?;
-
-        let mut subtasks_map: std::collections::HashMap<i64, Vec<Subtask>> =
-            std::collections::HashMap::new();
-        for res in subtask_rows {
-            if let Ok(sub) = res {
-                subtasks_map.entry(sub.task_id).or_default().push(sub);
-            }
-        }
-
-        let mut tasks = Vec::new();
-        for (id, task_id, title, description, completed, status_str, assignee, created_at) in
-            task_rows
-        {
-            let subtasks = subtasks_map.remove(&id).unwrap_or_default();
-            tasks.push(Task {
-                id,
-                task_id,
-                title,
-                description,
-                completed,
-                status: TaskStatus::from_str(&status_str),
-                assignee,
-                created_at,
-                subtasks,
-            });
-        }
         Ok(tasks)
     })();
 
     match result {
         Ok(tasks) => HttpResponse::Ok().json(tasks),
+        Err(e) => e.to_response(),
+    }
+}
+
+pub async fn get_task_detail(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
+    let result = (|| -> Result<TaskDetail, AppError> {
+        let conn = data.db.get()?;
+        workflow::load_task_detail(&conn, path.into_inner())
+    })();
+
+    match result {
+        Ok(task) => HttpResponse::Ok().json(task),
         Err(e) => e.to_response(),
     }
 }
@@ -110,12 +156,13 @@ pub async fn create_task(
     let result = (|| -> Result<Task, AppError> {
         let conn = data.db.get()?;
         let created_at_str = Utc::now().to_rfc3339();
-        let default_status = TaskStatus::Pending;
+        let default_status = WorkflowStatus::Plan;
 
         conn.execute(
-            "INSERT INTO tasks (task_id, title, description, completed, status, assignee, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
+            "INSERT INTO tasks (task_id, title, description, archived, status, assignee, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
             params![item.task_id, item.title, item.description, default_status.as_str(), item.assignee, created_at_str],
-        ).map_err(|e| match e {
+        )
+        .map_err(|e| match e {
             rusqlite::Error::SqliteFailure(ref err, _) if err.extended_code == 2067 => {
                 AppError::Conflict("Task ID already exists".to_string())
             }
@@ -128,7 +175,7 @@ pub async fn create_task(
             task_id: item.task_id.clone(),
             title: item.title.clone(),
             description: item.description.clone(),
-            completed: false,
+            archived: false,
             status: default_status,
             assignee: item.assignee.clone(),
             created_at: created_at_str,
@@ -151,67 +198,48 @@ pub async fn update_task(
 
     let result = (|| -> Result<Task, AppError> {
         let conn = data.db.get()?;
+        let existing = load_task(&conn, id)?;
 
-        let mut stmt = conn.prepare(
-            "SELECT task_id, title, description, completed, status, assignee, created_at FROM tasks WHERE id = ?1",
-        )?;
-
-        let task_data = stmt
-            .query_row(params![id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i32>(3)? == 1,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            })
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
-                other => AppError::Db(other),
-            })?;
-
-        let current_status = TaskStatus::from_str(&task_data.4);
-
-        let new_task_id = item.task_id.clone().unwrap_or(task_data.0);
-        let new_title = item.title.clone().unwrap_or(task_data.1);
-        let new_desc = item.description.clone().unwrap_or(task_data.2);
-        let new_completed = item.completed.unwrap_or(task_data.3);
-        let new_status = item.status.unwrap_or(current_status);
-        let new_assignee = match item.assignee.clone() {
-            Some(a) => a,
-            None => task_data.5,
-        };
+        let new_task_id = item.task_id.clone().unwrap_or(existing.task_id);
+        let new_title = item.title.clone().unwrap_or(existing.title);
+        let new_desc = item.description.clone().unwrap_or(existing.description);
+        let new_assignee = item.assignee.clone().unwrap_or(existing.assignee);
 
         conn.execute(
-            "UPDATE tasks SET task_id = ?1, title = ?2, description = ?3, completed = ?4, status = ?5, assignee = ?6 WHERE id = ?7",
-            params![new_task_id, new_title, new_desc, new_completed as i32, new_status.as_str(), new_assignee, id],
-        ).map_err(|e| match e {
+            "UPDATE tasks SET task_id = ?1, title = ?2, description = ?3, assignee = ?4 WHERE id = ?5",
+            params![new_task_id, new_title, new_desc, new_assignee, id],
+        )
+        .map_err(|e| match e {
             rusqlite::Error::SqliteFailure(ref err, _) if err.extended_code == 2067 => {
                 AppError::Conflict("Task ID already exists".to_string())
             }
             other => AppError::Db(other),
         })?;
 
-        let subtasks = get_subtasks_for_task(&conn, id)?;
-
-        Ok(Task {
-            id,
-            task_id: new_task_id,
-            title: new_title,
-            description: new_desc,
-            completed: new_completed,
-            status: new_status,
-            assignee: new_assignee,
-            created_at: task_data.6,
-            subtasks,
-        })
+        load_task(&conn, id)
     })();
 
     match result {
         Ok(task) => HttpResponse::Ok().json(task),
+        Err(e) => e.to_response(),
+    }
+}
+
+pub async fn transition_task(
+    data: web::Data<AppState>,
+    path: web::Path<i64>,
+    item: web::Json<TransitionTaskRequest>,
+) -> HttpResponse {
+    let task_id = path.into_inner();
+
+    let result = (|| -> Result<TransitionTaskResponse, AppError> {
+        let mut conn = data.db.get()?;
+        let detail = workflow::transition_task(&mut conn, task_id, item.into_inner())?;
+        Ok(TransitionTaskResponse { task: detail })
+    })();
+
+    match result {
+        Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => e.to_response(),
     }
 }
@@ -240,7 +268,7 @@ pub async fn add_subtask(
     item: web::Json<CreateSubtask>,
 ) -> HttpResponse {
     let task_id = path.into_inner();
-    let default_status = TaskStatus::Pending;
+    let default_status = WorkflowStatus::Plan;
 
     let result = (|| -> Result<Subtask, AppError> {
         let conn = data.db.get()?;
@@ -331,11 +359,8 @@ pub async fn update_subtask(
 
         let new_title = item.title.clone().unwrap_or(sub_data.0);
         let new_completed = item.completed.unwrap_or(sub_data.1);
-        let new_status = item.status.unwrap_or(TaskStatus::from_str(&sub_data.2));
-        let new_assignee = match item.assignee.clone() {
-            Some(a) => a,
-            None => sub_data.3,
-        };
+        let new_status = item.status.unwrap_or(WorkflowStatus::from_str(&sub_data.2));
+        let new_assignee = item.assignee.clone().unwrap_or(sub_data.3);
 
         conn.execute(
             "UPDATE subtasks SET title = ?1, completed = ?2, status = ?3, assignee = ?4 WHERE id = ?5",

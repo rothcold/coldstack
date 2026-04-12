@@ -6,27 +6,47 @@ use crate::adapters::{EmployeeConfig, TaskInfo};
 use crate::db::AppState;
 use crate::errors::AppError;
 use crate::models::*;
+use crate::workflow::infer_workflow_role;
+
+const SUPPORTED_AGENT_BACKENDS: &[&str] = &["claude_code"];
+
+fn validate_agent_backend(backend: &str) -> Result<(), AppError> {
+    if SUPPORTED_AGENT_BACKENDS.contains(&backend) {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "Unsupported agent backend: {}",
+        backend
+    )))
+}
 
 pub async fn get_employees(data: web::Data<AppState>) -> HttpResponse {
-    let result = (|| -> Result<Vec<Employee>, AppError> {
+    let result = (|| -> Result<Vec<(Employee, String)>, AppError> {
         let conn = data.db.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, role, department, agent_backend, system_prompt, status, created_at FROM ai_employees ORDER BY id",
+            "SELECT id, name, role, workflow_role, department, agent_backend, system_prompt, status, created_at FROM ai_employees ORDER BY id",
         )?;
 
         let employees = stmt
             .query_map([], |row| {
-                let status_str: String = row.get(6)?;
-                Ok(Employee {
+                let status_str: String = row.get(7)?;
+                let workflow_role: String = row.get(3)?;
+                let agent_backend: String = row.get(5)?;
+                Ok((
+                    Employee {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     role: row.get(2)?,
-                    department: row.get(3)?,
-                    agent_backend: row.get(4)?,
-                    system_prompt: row.get(5)?,
+                    workflow_role: WorkflowRole::from_str(&workflow_role),
+                    department: row.get(4)?,
+                    agent_backend: agent_backend.clone(),
+                    backend_available: false,
+                    system_prompt: row.get(6)?,
                     status: EmployeeStatus::from_str(&status_str),
-                    created_at: row.get(7)?,
-                })
+                    created_at: row.get(8)?,
+                    },
+                    agent_backend,
+                ))
             })?
             .filter_map(|r| r.ok())
             .collect();
@@ -35,7 +55,15 @@ pub async fn get_employees(data: web::Data<AppState>) -> HttpResponse {
     })();
 
     match result {
-        Ok(employees) => HttpResponse::Ok().json(employees),
+        Ok(employees) => HttpResponse::Ok().json(
+            employees
+                .into_iter()
+                .map(|(mut employee, backend)| {
+                    employee.backend_available = data.adapters.is_available(&backend);
+                    employee
+                })
+                .collect::<Vec<Employee>>(),
+        ),
         Err(e) => e.to_response(),
     }
 }
@@ -49,19 +77,23 @@ pub async fn get_employee(
     let result = (|| -> Result<Employee, AppError> {
         let conn = data.db.get()?;
         conn.query_row(
-            "SELECT id, name, role, department, agent_backend, system_prompt, status, created_at FROM ai_employees WHERE id = ?1",
+            "SELECT id, name, role, workflow_role, department, agent_backend, system_prompt, status, created_at FROM ai_employees WHERE id = ?1",
             params![id],
             |row| {
-                let status_str: String = row.get(6)?;
+                let status_str: String = row.get(7)?;
+                let workflow_role: String = row.get(3)?;
+                let agent_backend: String = row.get(5)?;
                 Ok(Employee {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     role: row.get(2)?,
-                    department: row.get(3)?,
-                    agent_backend: row.get(4)?,
-                    system_prompt: row.get(5)?,
+                    workflow_role: WorkflowRole::from_str(&workflow_role),
+                    department: row.get(4)?,
+                    backend_available: data.adapters.is_available(&agent_backend),
+                    agent_backend,
+                    system_prompt: row.get(6)?,
                     status: EmployeeStatus::from_str(&status_str),
-                    created_at: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             },
         ).map_err(|e| match e {
@@ -83,10 +115,14 @@ pub async fn create_employee(
     let result = (|| -> Result<Employee, AppError> {
         let conn = data.db.get()?;
         let created_at = Utc::now().to_rfc3339();
+        validate_agent_backend(&item.agent_backend)?;
+        let workflow_role = item
+            .workflow_role
+            .unwrap_or_else(|| infer_workflow_role(&item.role));
 
         conn.execute(
-            "INSERT INTO ai_employees (name, role, department, agent_backend, system_prompt, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![item.name, item.role, item.department, item.agent_backend, item.system_prompt, created_at],
+            "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, system_prompt, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![item.name, item.role, workflow_role.as_str(), item.department, item.agent_backend, item.system_prompt, created_at],
         )?;
 
         let id = conn.last_insert_rowid();
@@ -94,8 +130,10 @@ pub async fn create_employee(
             id,
             name: item.name.clone(),
             role: item.role.clone(),
+            workflow_role,
             department: item.department.clone(),
             agent_backend: item.agent_backend.clone(),
+            backend_available: data.adapters.is_available(&item.agent_backend),
             system_prompt: item.system_prompt.clone(),
             status: EmployeeStatus::Idle,
             created_at,
@@ -120,19 +158,23 @@ pub async fn update_employee(
 
         let existing = conn
             .query_row(
-                "SELECT id, name, role, department, agent_backend, system_prompt, status, created_at FROM ai_employees WHERE id = ?1",
+                "SELECT id, name, role, workflow_role, department, agent_backend, system_prompt, status, created_at FROM ai_employees WHERE id = ?1",
                 params![id],
                 |row| {
-                    let status_str: String = row.get(6)?;
+                    let status_str: String = row.get(7)?;
+                    let workflow_role: String = row.get(3)?;
+                    let agent_backend: String = row.get(5)?;
                     Ok(Employee {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         role: row.get(2)?,
-                        department: row.get(3)?,
-                        agent_backend: row.get(4)?,
-                        system_prompt: row.get(5)?,
+                        workflow_role: WorkflowRole::from_str(&workflow_role),
+                        department: row.get(4)?,
+                        backend_available: false,
+                        agent_backend,
+                        system_prompt: row.get(6)?,
                         status: EmployeeStatus::from_str(&status_str),
-                        created_at: row.get(7)?,
+                        created_at: row.get(8)?,
                     })
                 },
             )
@@ -143,23 +185,29 @@ pub async fn update_employee(
 
         let new_name = item.name.clone().unwrap_or(existing.name);
         let new_role = item.role.clone().unwrap_or(existing.role);
+        let new_workflow_role = item
+            .workflow_role
+            .unwrap_or_else(|| infer_workflow_role(&new_role));
         let new_department = item.department.clone().unwrap_or(existing.department);
         let new_backend = item.agent_backend.clone().unwrap_or(existing.agent_backend);
+        validate_agent_backend(&new_backend)?;
         let new_prompt = match item.system_prompt.clone() {
             Some(p) => p,
             None => existing.system_prompt,
         };
 
         conn.execute(
-            "UPDATE ai_employees SET name = ?1, role = ?2, department = ?3, agent_backend = ?4, system_prompt = ?5 WHERE id = ?6",
-            params![new_name, new_role, new_department, new_backend, new_prompt, id],
+            "UPDATE ai_employees SET name = ?1, role = ?2, workflow_role = ?3, department = ?4, agent_backend = ?5, system_prompt = ?6 WHERE id = ?7",
+            params![new_name, new_role, new_workflow_role.as_str(), new_department, new_backend, new_prompt, id],
         )?;
 
         Ok(Employee {
             id,
             name: new_name,
             role: new_role,
+            workflow_role: new_workflow_role,
             department: new_department,
+            backend_available: data.adapters.is_available(&new_backend),
             agent_backend: new_backend,
             system_prompt: new_prompt,
             status: existing.status,
@@ -261,12 +309,19 @@ pub async fn assign_task(
         }
 
         // Get employee info for execution setup
-        let (name, role, backend, system_prompt): (String, String, String, Option<String>) = tx
+        let (backend, system_prompt): (String, Option<String>) = tx
             .query_row(
-                "SELECT name, role, agent_backend, system_prompt FROM ai_employees WHERE id = ?1",
+                "SELECT agent_backend, system_prompt FROM ai_employees WHERE id = ?1",
                 params![employee_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+        validate_agent_backend(&backend)?;
+        if !data.adapters.is_available(&backend) {
+            return Err(AppError::Conflict(format!(
+                "Adapter backend '{}' is not available on this server",
+                backend
+            )));
+        }
 
         let started_at = Utc::now().to_rfc3339();
 
@@ -296,8 +351,6 @@ pub async fn assign_task(
         };
 
         let employee_config = EmployeeConfig {
-            name,
-            role,
             system_prompt,
         };
 
@@ -317,6 +370,44 @@ pub async fn assign_task(
             ));
             HttpResponse::Created().json(execution)
         }
+        Err(e) => e.to_response(),
+    }
+}
+
+pub async fn get_current_execution(
+    data: web::Data<AppState>,
+    path: web::Path<i64>,
+) -> HttpResponse {
+    let employee_id = path.into_inner();
+
+    let result = (|| -> Result<CurrentExecution, AppError> {
+        let conn = data.db.get()?;
+        conn.query_row(
+            "SELECT te.id, te.task_id, t.task_id, t.title, te.started_at
+             FROM task_executions te
+             JOIN tasks t ON t.id = te.task_id
+             WHERE te.employee_id = ?1 AND te.status = 'running'
+             ORDER BY te.started_at DESC
+             LIMIT 1",
+            params![employee_id],
+            |row| {
+                Ok(CurrentExecution {
+                    execution_id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    task_key: row.get(2)?,
+                    task_title: row.get(3)?,
+                    started_at: row.get(4)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
+            other => AppError::Db(other),
+        })
+    })();
+
+    match result {
+        Ok(current) => HttpResponse::Ok().json(current),
         Err(e) => e.to_response(),
     }
 }

@@ -1,4 +1,6 @@
 release/
 .gstack/
-task.db
-
+tasks.db
+backend/tasks.db
+frontend/test-results/
+done/
