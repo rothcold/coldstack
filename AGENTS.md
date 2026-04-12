@@ -1,0 +1,2 @@
+- 前端使用pnpm打包
+- Rust Edition 使用 2024
