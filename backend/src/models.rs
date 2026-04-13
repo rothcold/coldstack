@@ -200,7 +200,8 @@ pub struct TaskDetail {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTask {
-    pub task_id: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
     pub title: String,
     pub description: String,
     pub assignee: Option<String>,

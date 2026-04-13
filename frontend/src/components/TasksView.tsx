@@ -15,14 +15,12 @@ import TransitionActions from './TransitionActions'
 import WorkflowBoard from './WorkflowBoard'
 
 type TaskFormState = {
-  task_id: string
   title: string
   description: string
   assignee: string
 }
 
 const EMPTY_FORM: TaskFormState = {
-  task_id: '',
   title: '',
   description: '',
   assignee: '',
@@ -79,6 +77,9 @@ export default function TasksView() {
   const [error, setError] = useState<string | null>(null)
 
   const [rejectPayload, setRejectPayload] = useState<TransitionPayload | null>(null)
+  const [assignModalOpen, setAssignModalOpen] = useState(false)
+  const [assigning, setAssigning] = useState(false)
+  const [assignError, setAssignError] = useState<string | null>(null)
   const detailPanelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -145,7 +146,6 @@ export default function TasksView() {
     if (!selectedTask) return
     setEditingDetail(selectedTask)
     setForm({
-      task_id: selectedTask.task.task_id,
       title: selectedTask.task.title,
       description: selectedTask.task.description,
       assignee: selectedTask.task.assignee ?? '',
@@ -161,27 +161,19 @@ export default function TasksView() {
 
   const handleTaskSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (!form.task_id.trim() || !form.title.trim()) {
-      setError('Task ID and title are required.')
+    if (!form.title.trim()) {
+      setError('Title is required.')
       return
     }
 
     setSaving(true)
     setError(null)
     try {
-      const payload: CreateTaskPayload | UpdateTaskPayload = editingDetail
-        ? {
-            task_id: form.task_id.trim(),
-            title: form.title.trim(),
-            description: form.description.trim(),
-            assignee: form.assignee || null,
-          }
-        : {
-            task_id: form.task_id.trim(),
-            title: form.title.trim(),
-            description: form.description.trim(),
-            assignee: form.assignee || null,
-          }
+      const payload: CreateTaskPayload | UpdateTaskPayload = {
+        title: form.title.trim(),
+        description: form.description.trim(),
+        assignee: form.assignee || null,
+      }
 
       const response = await fetch(editingDetail ? `/api/tasks/${editingDetail.task.id}` : '/api/tasks', {
         method: editingDetail ? 'PUT' : 'POST',
@@ -217,6 +209,34 @@ export default function TasksView() {
     await fetch(`/api/tasks/${selectedTask.task.id}`, { method: 'DELETE' })
     closeDetail()
     await fetchTasks()
+  }
+
+  const openAssignModal = () => {
+    if (!selectedTask) return
+    setAssignError(null)
+    setAssignModalOpen(true)
+  }
+
+  const handleAssign = async (employeeId: number) => {
+    if (!selectedTask) return
+    setAssigning(true)
+    setAssignError(null)
+    try {
+      const response = await fetch(`/api/employees/${employeeId}/assign/${selectedTask.task.id}`, {
+        method: 'POST',
+      })
+      if (!response.ok) {
+        const message = await response.text()
+        throw new Error(message || `${response.status} ${response.statusText}`)
+      }
+      setAssignModalOpen(false)
+      await fetchEmployees()
+      await fetchTaskDetail(selectedTask.task.id)
+    } catch (err) {
+      setAssignError(err instanceof Error ? err.message : 'Failed to assign task')
+    } finally {
+      setAssigning(false)
+    }
   }
 
   const handleTransition = async (payload: TransitionPayload) => {
@@ -339,6 +359,7 @@ export default function TasksView() {
               onClose={closeDetail}
               onTransition={handleTransition}
               onReject={setRejectPayload}
+              onAssign={openAssignModal}
             />
           </div>
         )}
@@ -356,6 +377,7 @@ export default function TasksView() {
             onClose={closeDetail}
             onTransition={handleTransition}
             onReject={setRejectPayload}
+            onAssign={openAssignModal}
             compact
           />
         </Modal>
@@ -368,11 +390,8 @@ export default function TasksView() {
         width={640}
       >
         <form onSubmit={handleTaskSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          <Field label="Task ID">
-            <input autoFocus value={form.task_id} onChange={(event) => setForm((current) => ({ ...current, task_id: event.target.value }))} />
-          </Field>
           <Field label="Title">
-            <input value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} />
+            <input autoFocus value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} />
           </Field>
           <Field label="Description">
             <textarea
@@ -416,6 +435,60 @@ export default function TasksView() {
         onClose={() => setRejectPayload(null)}
         onSubmit={(payload) => void handleTransition(payload)}
       />
+
+      <Modal
+        open={assignModalOpen}
+        title={selectedTask ? `Assign ${selectedTask.task.task_id}` : 'Assign to Agent'}
+        onClose={() => setAssignModalOpen(false)}
+        width={480}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          {employees.length === 0 ? (
+            <div style={{ color: 'var(--text-tertiary)' }}>No agents available. Create one in the Company view first.</div>
+          ) : (
+            employees.map((employee) => {
+              const busy = employee.status !== 'idle'
+              const unavailable = !employee.backend_available
+              const disabled = busy || unavailable || assigning
+              return (
+                <button
+                  key={employee.id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => void handleAssign(employee.id)}
+                  style={{
+                    textAlign: 'left',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.25rem',
+                    padding: '0.75rem 1rem',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: 'var(--radius-md)',
+                    background: disabled ? 'var(--bg-secondary)' : 'var(--bg-primary)',
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                    opacity: disabled ? 0.6 : 1,
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    {employee.name} <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}>· {employee.role}</span>
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
+                    {employee.workflow_role} · {employee.agent_backend}
+                    {busy && ' · busy'}
+                    {unavailable && ' · backend unavailable'}
+                  </div>
+                </button>
+              )
+            })
+          )}
+
+          {assignError && (
+            <div style={{ padding: '0.75rem', borderRadius: 'var(--radius-md)', background: 'rgba(239,68,68,0.08)', color: 'rgb(185, 28, 28)' }}>
+              {assignError}
+            </div>
+          )}
+        </div>
+      </Modal>
     </div>
   )
 }
@@ -447,6 +520,7 @@ function TaskDetailShell({
   onClose,
   onTransition,
   onReject,
+  onAssign,
   compact = false,
 }: {
   detail: TaskDetail | null
@@ -458,6 +532,7 @@ function TaskDetailShell({
   onClose: () => void
   onTransition: (payload: TransitionPayload) => void
   onReject: (payload: TransitionPayload) => void
+  onAssign: () => void
   compact?: boolean
 }) {
   if (!detail) {
@@ -502,6 +577,13 @@ function TaskDetailShell({
           <div style={{ marginTop: '0.35rem', fontSize: '1.15rem', fontWeight: 700 }}>{detail.task.title}</div>
         </div>
         <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            onClick={onAssign}
+            style={{ background: 'var(--accent-primary)', color: 'white', border: 'none', minHeight: 44 }}
+          >
+            Assign to Agent
+          </button>
           <button
             type="button"
             onClick={onEdit}

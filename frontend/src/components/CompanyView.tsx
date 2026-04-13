@@ -64,7 +64,7 @@ export default function CompanyView() {
       role: employee.role,
       workflow_role: employee.workflow_role,
       department: employee.department,
-      agent_backend: employee.agent_backend,
+      agent_backend: employee.agent_backend || 'claude_code',
       system_prompt: employee.system_prompt ?? '',
     })
     setError(null)
