@@ -150,6 +150,7 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         assert!(employee_cols.contains(&"workflow_role".to_string()));
+        assert!(employee_cols.contains(&"custom_prompt".to_string()));
     }
 
     #[::core::prelude::v1::test]
@@ -201,6 +202,81 @@ mod tests {
             .unwrap();
         assert_eq!(archived, 1);
         assert_eq!(status, "Coding");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_init_db_migrates_system_prompt_to_custom_prompt() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE ai_employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                department TEXT NOT NULL,
+                agent_backend TEXT NOT NULL,
+                system_prompt TEXT,
+                status TEXT NOT NULL DEFAULT 'idle',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_employees (name, role, department, agent_backend, system_prompt, created_at) VALUES ('Legacy', 'Reviewer', 'QA', 'claude_code', 'legacy custom prompt', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        db::init_db(&conn).unwrap();
+        db::init_db(&conn).unwrap();
+
+        let (custom_prompt, workflow_role): (Option<String>, String) = conn
+            .query_row(
+                "SELECT custom_prompt, workflow_role FROM ai_employees WHERE name = 'Legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(custom_prompt.as_deref(), Some("legacy custom prompt"));
+        assert_eq!(workflow_role, "reviewer");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_compose_employee_prompt_by_role() {
+        let cases = [
+            (models::WorkflowRole::Planner, "implementation plan only"),
+            (models::WorkflowRole::Designer, "design standards"),
+            (models::WorkflowRole::Coder, "Write and update code only"),
+            (models::WorkflowRole::Reviewer, "Review code changes only"),
+            (models::WorkflowRole::Qa, "Test behavior only"),
+        ];
+
+        for (role, expected) in cases {
+            let prompt = workflow::compose_employee_prompt(role, None);
+            assert!(prompt.contains(expected), "missing '{expected}' for {:?}", role);
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_compose_employee_prompt_appends_custom_instructions() {
+        let prompt = workflow::compose_employee_prompt(
+            models::WorkflowRole::Coder,
+            Some("Only touch backend/src"),
+        );
+        assert!(prompt.starts_with("You are the coder."));
+        assert!(prompt.ends_with("Only touch backend/src"));
+        assert!(prompt.contains("\n\nOnly touch backend/src"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_assign_path_builds_employee_config_from_composed_prompt() {
+        let config = handlers::employees::build_employee_config(
+            models::WorkflowRole::Reviewer,
+            Some("Focus on regressions".to_string()),
+        );
+        let prompt = config.system_prompt.as_deref().unwrap();
+        assert!(prompt.contains("Review code changes only"));
+        assert!(prompt.ends_with("Focus on regressions"));
     }
 
     #[::core::prelude::v1::test]
@@ -404,6 +480,118 @@ mod tests {
 
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["workflow_role"], "reviewer");
+        assert_eq!(body["custom_prompt"], serde_json::Value::Null);
+        assert!(
+            body["system_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Review code changes only")
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_create_employee_appends_custom_prompt() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Coder",
+                "role": "Coder",
+                "workflow_role": "coder",
+                "department": "Engineering",
+                "agent_backend": "claude_code",
+                "custom_prompt": "Only edit backend/src"
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 201);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["custom_prompt"], "Only edit backend/src");
+        assert!(
+            body["system_prompt"]
+                .as_str()
+                .unwrap()
+                .ends_with("Only edit backend/src")
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_update_employee_rebuilds_prompt_for_new_role() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let create_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Agent",
+                "role": "Coder",
+                "workflow_role": "coder",
+                "department": "Engineering",
+                "agent_backend": "claude_code",
+                "custom_prompt": "Stay in src/"
+            }))
+            .to_request();
+        let create_resp = test::call_service(&app, create_req).await;
+        let created: serde_json::Value = test::read_body_json(create_resp).await;
+
+        let update_req = test::TestRequest::put()
+            .uri(&format!("/api/employees/{}", created["id"].as_i64().unwrap()))
+            .set_json(serde_json::json!({
+                "role": "Reviewer",
+                "workflow_role": "reviewer"
+            }))
+            .to_request();
+        let update_resp = test::call_service(&app, update_req).await;
+        assert_eq!(update_resp.status(), 200);
+
+        let updated: serde_json::Value = test::read_body_json(update_resp).await;
+        assert_eq!(updated["workflow_role"], "reviewer");
+        assert_eq!(updated["custom_prompt"], "Stay in src/");
+        let prompt = updated["system_prompt"].as_str().unwrap();
+        assert!(prompt.contains("Review code changes only"));
+        assert!(!prompt.contains("Write and update code only"));
+        assert!(prompt.ends_with("Stay in src/"));
+    }
+
+    #[actix_web::test]
+    async fn test_update_employee_preserves_custom_prompt_when_omitted() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let create_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Planner",
+                "role": "Planner",
+                "workflow_role": "planner",
+                "department": "Product",
+                "agent_backend": "claude_code",
+                "custom_prompt": "Call out rollout risks"
+            }))
+            .to_request();
+        let create_resp = test::call_service(&app, create_req).await;
+        let created: serde_json::Value = test::read_body_json(create_resp).await;
+
+        let update_req = test::TestRequest::put()
+            .uri(&format!("/api/employees/{}", created["id"].as_i64().unwrap()))
+            .set_json(serde_json::json!({
+                "department": "Operations"
+            }))
+            .to_request();
+        let update_resp = test::call_service(&app, update_req).await;
+        assert_eq!(update_resp.status(), 200);
+
+        let updated: serde_json::Value = test::read_body_json(update_resp).await;
+        assert_eq!(updated["custom_prompt"], "Call out rollout risks");
+        assert!(
+            updated["system_prompt"]
+                .as_str()
+                .unwrap()
+                .ends_with("Call out rollout risks")
+        );
     }
 
     #[actix_web::test]

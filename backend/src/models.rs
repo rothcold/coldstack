@@ -340,7 +340,8 @@ pub struct Employee {
     pub department: String,
     pub agent_backend: String,
     pub backend_available: bool,
-    pub system_prompt: Option<String>,
+    pub custom_prompt: Option<String>,
+    pub system_prompt: String,
     pub status: EmployeeStatus,
     pub created_at: String,
 }
@@ -352,7 +353,7 @@ pub struct CreateEmployee {
     pub workflow_role: Option<WorkflowRole>,
     pub department: String,
     pub agent_backend: String,
-    pub system_prompt: Option<String>,
+    pub custom_prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,7 +364,7 @@ pub struct UpdateEmployee {
     pub department: Option<String>,
     pub agent_backend: Option<String>,
     #[serde(default, with = "double_option")]
-    pub system_prompt: Option<Option<String>>,
+    pub custom_prompt: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
