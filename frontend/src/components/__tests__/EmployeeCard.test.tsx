@@ -29,6 +29,8 @@ describe('EmployeeCard backend availability', () => {
           department: 'Engineering',
           agent_backend: 'claude_code',
           backend_available: false,
+          custom_prompt: null,
+          system_prompt: 'You are the coder.',
           status: 'idle',
           created_at: '2026-04-12T00:00:00Z',
         }}

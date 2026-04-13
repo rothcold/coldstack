@@ -171,6 +171,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             workflow_role TEXT NOT NULL DEFAULT 'planner',
             department TEXT NOT NULL,
             agent_backend TEXT NOT NULL,
+            custom_prompt TEXT,
             system_prompt TEXT,
             status TEXT NOT NULL DEFAULT 'idle',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -212,6 +213,19 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     if !columns.contains(&"workflow_role".to_string()) {
         conn.execute(
             "ALTER TABLE ai_employees ADD COLUMN workflow_role TEXT NOT NULL DEFAULT 'planner'",
+            [],
+        )?;
+    }
+    if !columns.contains(&"custom_prompt".to_string()) {
+        conn.execute("ALTER TABLE ai_employees ADD COLUMN custom_prompt TEXT", [])?;
+    }
+    if columns.contains(&"system_prompt".to_string()) {
+        conn.execute(
+            "UPDATE ai_employees
+             SET custom_prompt = system_prompt
+             WHERE custom_prompt IS NULL
+               AND system_prompt IS NOT NULL
+               AND TRIM(system_prompt) != ''",
             [],
         )?;
     }
@@ -358,7 +372,7 @@ pub fn seed_employees(conn: &Connection) -> rusqlite::Result<()> {
 
     for (name, role, department, backend, prompt) in employees {
         conn.execute(
-            "INSERT INTO ai_employees (name, role, department, agent_backend, system_prompt) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO ai_employees (name, role, department, agent_backend, custom_prompt) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![name, role, department, backend, prompt],
         )?;
     }

@@ -6,7 +6,7 @@ use crate::adapters::{EmployeeConfig, TaskInfo};
 use crate::db::AppState;
 use crate::errors::AppError;
 use crate::models::*;
-use crate::workflow::infer_workflow_role;
+use crate::workflow::{compose_employee_prompt, infer_workflow_role, normalize_custom_prompt};
 
 const SUPPORTED_AGENT_BACKENDS: &[&str] = &["claude_code"];
 
@@ -20,11 +20,23 @@ fn validate_agent_backend(backend: &str) -> Result<(), AppError> {
     )))
 }
 
+pub(crate) fn build_employee_config(
+    workflow_role: WorkflowRole,
+    custom_prompt: Option<String>,
+) -> EmployeeConfig {
+    EmployeeConfig {
+        system_prompt: Some(compose_employee_prompt(
+            workflow_role,
+            custom_prompt.as_deref(),
+        )),
+    }
+}
+
 pub async fn get_employees(data: web::Data<AppState>) -> HttpResponse {
     let result = (|| -> Result<Vec<(Employee, String)>, AppError> {
         let conn = data.db.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, role, workflow_role, department, agent_backend, system_prompt, status, created_at FROM ai_employees ORDER BY id",
+            "SELECT id, name, role, workflow_role, department, agent_backend, custom_prompt, status, created_at FROM ai_employees ORDER BY id",
         )?;
 
         let employees = stmt
@@ -32,16 +44,19 @@ pub async fn get_employees(data: web::Data<AppState>) -> HttpResponse {
                 let status_str: String = row.get(7)?;
                 let workflow_role: String = row.get(3)?;
                 let agent_backend: String = row.get(5)?;
+                let workflow_role = WorkflowRole::from_str(&workflow_role);
+                let custom_prompt: Option<String> = row.get(6)?;
                 Ok((
                     Employee {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     role: row.get(2)?,
-                    workflow_role: WorkflowRole::from_str(&workflow_role),
+                    workflow_role,
                     department: row.get(4)?,
                     agent_backend: agent_backend.clone(),
                     backend_available: false,
-                    system_prompt: row.get(6)?,
+                    custom_prompt: custom_prompt.clone(),
+                    system_prompt: compose_employee_prompt(workflow_role, custom_prompt.as_deref()),
                     status: EmployeeStatus::from_str(&status_str),
                     created_at: row.get(8)?,
                     },
@@ -77,21 +92,24 @@ pub async fn get_employee(
     let result = (|| -> Result<Employee, AppError> {
         let conn = data.db.get()?;
         conn.query_row(
-            "SELECT id, name, role, workflow_role, department, agent_backend, system_prompt, status, created_at FROM ai_employees WHERE id = ?1",
+            "SELECT id, name, role, workflow_role, department, agent_backend, custom_prompt, status, created_at FROM ai_employees WHERE id = ?1",
             params![id],
             |row| {
                 let status_str: String = row.get(7)?;
                 let workflow_role: String = row.get(3)?;
                 let agent_backend: String = row.get(5)?;
+                let workflow_role = WorkflowRole::from_str(&workflow_role);
+                let custom_prompt: Option<String> = row.get(6)?;
                 Ok(Employee {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     role: row.get(2)?,
-                    workflow_role: WorkflowRole::from_str(&workflow_role),
+                    workflow_role,
                     department: row.get(4)?,
                     backend_available: data.adapters.is_available(&agent_backend),
                     agent_backend,
-                    system_prompt: row.get(6)?,
+                    custom_prompt: custom_prompt.clone(),
+                    system_prompt: compose_employee_prompt(workflow_role, custom_prompt.as_deref()),
                     status: EmployeeStatus::from_str(&status_str),
                     created_at: row.get(8)?,
                 })
@@ -119,10 +137,11 @@ pub async fn create_employee(
         let workflow_role = item
             .workflow_role
             .unwrap_or_else(|| infer_workflow_role(&item.role));
+        let custom_prompt = normalize_custom_prompt(item.custom_prompt.clone());
 
         conn.execute(
-            "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, system_prompt, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![item.name, item.role, workflow_role.as_str(), item.department, item.agent_backend, item.system_prompt, created_at],
+            "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, custom_prompt, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![item.name, item.role, workflow_role.as_str(), item.department, item.agent_backend, custom_prompt, created_at],
         )?;
 
         let id = conn.last_insert_rowid();
@@ -134,7 +153,8 @@ pub async fn create_employee(
             department: item.department.clone(),
             agent_backend: item.agent_backend.clone(),
             backend_available: data.adapters.is_available(&item.agent_backend),
-            system_prompt: item.system_prompt.clone(),
+            custom_prompt: custom_prompt.clone(),
+            system_prompt: compose_employee_prompt(workflow_role, custom_prompt.as_deref()),
             status: EmployeeStatus::Idle,
             created_at,
         })
@@ -158,21 +178,24 @@ pub async fn update_employee(
 
         let existing = conn
             .query_row(
-                "SELECT id, name, role, workflow_role, department, agent_backend, system_prompt, status, created_at FROM ai_employees WHERE id = ?1",
+                "SELECT id, name, role, workflow_role, department, agent_backend, custom_prompt, status, created_at FROM ai_employees WHERE id = ?1",
                 params![id],
                 |row| {
                     let status_str: String = row.get(7)?;
                     let workflow_role: String = row.get(3)?;
                     let agent_backend: String = row.get(5)?;
+                    let workflow_role = WorkflowRole::from_str(&workflow_role);
+                    let custom_prompt: Option<String> = row.get(6)?;
                     Ok(Employee {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         role: row.get(2)?,
-                        workflow_role: WorkflowRole::from_str(&workflow_role),
+                        workflow_role,
                         department: row.get(4)?,
                         backend_available: false,
                         agent_backend,
-                        system_prompt: row.get(6)?,
+                        custom_prompt: custom_prompt.clone(),
+                        system_prompt: compose_employee_prompt(workflow_role, custom_prompt.as_deref()),
                         status: EmployeeStatus::from_str(&status_str),
                         created_at: row.get(8)?,
                     })
@@ -191,14 +214,14 @@ pub async fn update_employee(
         let new_department = item.department.clone().unwrap_or(existing.department);
         let new_backend = item.agent_backend.clone().unwrap_or(existing.agent_backend);
         validate_agent_backend(&new_backend)?;
-        let new_prompt = match item.system_prompt.clone() {
-            Some(p) => p,
-            None => existing.system_prompt,
+        let new_custom_prompt = match item.custom_prompt.clone() {
+            Some(prompt) => normalize_custom_prompt(prompt),
+            None => existing.custom_prompt.clone(),
         };
 
         conn.execute(
-            "UPDATE ai_employees SET name = ?1, role = ?2, workflow_role = ?3, department = ?4, agent_backend = ?5, system_prompt = ?6 WHERE id = ?7",
-            params![new_name, new_role, new_workflow_role.as_str(), new_department, new_backend, new_prompt, id],
+            "UPDATE ai_employees SET name = ?1, role = ?2, workflow_role = ?3, department = ?4, agent_backend = ?5, custom_prompt = ?6 WHERE id = ?7",
+            params![new_name, new_role, new_workflow_role.as_str(), new_department, new_backend, new_custom_prompt, id],
         )?;
 
         Ok(Employee {
@@ -209,7 +232,8 @@ pub async fn update_employee(
             department: new_department,
             backend_available: data.adapters.is_available(&new_backend),
             agent_backend: new_backend,
-            system_prompt: new_prompt,
+            custom_prompt: new_custom_prompt.clone(),
+            system_prompt: compose_employee_prompt(new_workflow_role, new_custom_prompt.as_deref()),
             status: existing.status,
             created_at: existing.created_at,
         })
@@ -309,11 +333,11 @@ pub async fn assign_task(
         }
 
         // Get employee info for execution setup
-        let (backend, system_prompt): (String, Option<String>) = tx
+        let (backend, workflow_role, custom_prompt): (String, String, Option<String>) = tx
             .query_row(
-                "SELECT agent_backend, system_prompt FROM ai_employees WHERE id = ?1",
+                "SELECT agent_backend, workflow_role, custom_prompt FROM ai_employees WHERE id = ?1",
                 params![employee_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
         validate_agent_backend(&backend)?;
         if !data.adapters.is_available(&backend) {
@@ -350,9 +374,8 @@ pub async fn assign_task(
             task_id: task_id_str,
         };
 
-        let employee_config = EmployeeConfig {
-            system_prompt,
-        };
+        let employee_config =
+            build_employee_config(WorkflowRole::from_str(&workflow_role), custom_prompt);
 
         Ok((execution, task_info, employee_config, backend))
     })();

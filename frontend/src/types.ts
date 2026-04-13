@@ -126,7 +126,8 @@ export interface Employee {
   department: string
   agent_backend: string
   backend_available: boolean
-  system_prompt?: string | null
+  custom_prompt?: string | null
+  system_prompt: string
   status: EmployeeStatus
   created_at: string
 }
@@ -137,7 +138,7 @@ export interface EmployeePayload {
   workflow_role?: WorkflowRole
   department: string
   agent_backend: string
-  system_prompt?: string | null
+  custom_prompt?: string | null
 }
 
 export interface Execution {

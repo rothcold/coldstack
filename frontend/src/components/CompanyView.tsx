@@ -10,7 +10,7 @@ type EmployeeFormState = {
   workflow_role: WorkflowRole
   department: string
   agent_backend: string
-  system_prompt: string
+  custom_prompt: string
 }
 
 const EMPTY_FORM: EmployeeFormState = {
@@ -19,7 +19,7 @@ const EMPTY_FORM: EmployeeFormState = {
   workflow_role: 'planner',
   department: '',
   agent_backend: 'claude_code',
-  system_prompt: '',
+  custom_prompt: '',
 }
 
 export default function CompanyView() {
@@ -65,7 +65,7 @@ export default function CompanyView() {
       workflow_role: employee.workflow_role,
       department: employee.department,
       agent_backend: employee.agent_backend || 'claude_code',
-      system_prompt: employee.system_prompt ?? '',
+      custom_prompt: employee.custom_prompt ?? '',
     })
     setError(null)
     setModalOpen(true)
@@ -86,7 +86,7 @@ export default function CompanyView() {
         workflow_role: form.workflow_role,
         department: form.department.trim(),
         agent_backend: form.agent_backend,
-        system_prompt: form.system_prompt.trim() || null,
+        custom_prompt: form.custom_prompt.trim() || null,
       }
       const url = editingId ? `/api/employees/${editingId}` : '/api/employees'
       const res = await fetch(url, {
@@ -267,15 +267,18 @@ export default function CompanyView() {
               </select>
             </Field>
           </div>
-          <Field label="System Prompt">
+          <Field label="Additional Instructions">
             <textarea
-              value={form.system_prompt}
-              onChange={e => setForm({ ...form, system_prompt: e.target.value })}
-              placeholder="You are a helpful backend engineer…"
+              value={form.custom_prompt}
+              onChange={e => setForm({ ...form, custom_prompt: e.target.value })}
+              placeholder="Add any task-specific instructions that should come after the role default prompt."
               rows={5}
               style={{ resize: 'vertical', minHeight: '6rem' }}
             />
           </Field>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)', marginTop: '-0.5rem' }}>
+            The system will always prepend the default prompt for this workflow role. These instructions are appended after it.
+          </div>
 
           {error && (
             <div

@@ -34,6 +34,47 @@ pub fn infer_workflow_role(display_role: &str) -> WorkflowRole {
     }
 }
 
+pub fn default_prompt_for_role(role: WorkflowRole) -> &'static str {
+    match role {
+        WorkflowRole::Planner => {
+            "You are the planner. Produce an implementation plan only. Clarify scope, break work into concrete steps, call out risks, and do not write code."
+        }
+        WorkflowRole::Designer => {
+            "You are the designer. Focus only on design standards, interaction quality, hierarchy, accessibility, and visual consistency. Do not write production code."
+        }
+        WorkflowRole::Coder => {
+            "You are the coder. Write and update code only. Keep changes focused, correct, and minimal. Do not spend time on planning or review commentary."
+        }
+        WorkflowRole::Reviewer => {
+            "You are the reviewer. Review code changes only. Find bugs, regressions, missing edge cases, and test gaps. Do not rewrite the feature or implement unrelated changes."
+        }
+        WorkflowRole::Qa => {
+            "You are QA. Test behavior only. Verify flows, reproduce failures, and report precise results. Do not redesign the feature or make unrelated code changes."
+        }
+        WorkflowRole::Human => {
+            "You are the human approver. Make the final decision, give concise direction, and close the loop when the work is actually done."
+        }
+    }
+}
+
+pub fn normalize_custom_prompt(custom_prompt: Option<String>) -> Option<String> {
+    custom_prompt.and_then(|prompt| {
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+pub fn compose_employee_prompt(role: WorkflowRole, custom_prompt: Option<&str>) -> String {
+    match custom_prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        Some(custom_prompt) => format!("{}\n\n{}", default_prompt_for_role(role), custom_prompt),
+        None => default_prompt_for_role(role).to_string(),
+    }
+}
+
 pub fn workflow_hint(status: WorkflowStatus) -> Option<String> {
     match status {
         WorkflowStatus::NeedsHuman => Some("Only a human can close this loop.".to_string()),
