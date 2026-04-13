@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::BufReader;
 use tokio::process::Command;
@@ -6,6 +7,12 @@ use tokio::process::Command;
 use super::{AgentAdapter, AgentProcess, EmployeeConfig, TaskInfo};
 
 pub struct ClaudeCodeAdapter;
+
+fn sanitize_path(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
 
 impl ClaudeCodeAdapter {
     fn find_claude_binary() -> Option<String> {
@@ -47,11 +54,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
             )
         };
 
+        let workspace: PathBuf = PathBuf::from("agent_workspaces").join(sanitize_path(&task.task_id));
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| format!("Failed to create workspace {:?}: {}", workspace, e))?;
+
         let mut cmd = Command::new(&binary);
-        cmd.arg("-p")
+        cmd.current_dir(&workspace)
+            .arg("-p")
             .arg(&prompt)
             .arg("--output-format")
             .arg("stream-json")
+            .arg("--verbose")
+            .arg("--dangerously-skip-permissions")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(false);

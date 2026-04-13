@@ -158,9 +158,15 @@ pub async fn create_task(
         let created_at_str = Utc::now().to_rfc3339();
         let default_status = WorkflowStatus::Plan;
 
+        let task_id = item
+            .task_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("T-{}", uuid::Uuid::new_v4()));
+
         conn.execute(
             "INSERT INTO tasks (task_id, title, description, archived, status, assignee, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
-            params![item.task_id, item.title, item.description, default_status.as_str(), item.assignee, created_at_str],
+            params![task_id, item.title, item.description, default_status.as_str(), item.assignee, created_at_str],
         )
         .map_err(|e| match e {
             rusqlite::Error::SqliteFailure(ref err, _) if err.extended_code == 2067 => {
@@ -172,7 +178,7 @@ pub async fn create_task(
         let id = conn.last_insert_rowid();
         Ok(Task {
             id,
-            task_id: item.task_id.clone(),
+            task_id,
             title: item.title.clone(),
             description: item.description.clone(),
             archived: false,

@@ -93,7 +93,6 @@ export interface TransitionResponse {
 }
 
 export interface CreateTaskPayload {
-  task_id: string
   title: string
   description: string
   assignee?: string | null

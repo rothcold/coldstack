@@ -216,6 +216,10 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     conn.execute(
+        "UPDATE ai_employees SET agent_backend = 'claude_code' WHERE agent_backend IS NULL OR agent_backend = '' OR agent_backend NOT IN ('claude_code')",
+        [],
+    )?;
+    conn.execute(
         "UPDATE ai_employees
          SET workflow_role = CASE LOWER(role)
              WHEN 'planner' THEN 'planner'
