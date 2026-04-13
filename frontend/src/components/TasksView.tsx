@@ -7,6 +7,8 @@ import type {
   TransitionPayload,
   UpdateTaskPayload,
   WorkflowBoardGroup,
+  WorkflowRole,
+  WorkflowStatus,
 } from '../types'
 import Modal from './Modal'
 import RejectModal from './RejectModal'
@@ -27,6 +29,23 @@ const EMPTY_FORM: TaskFormState = {
 }
 
 const GROUP_ORDER: WorkflowBoardGroup[] = ['Plan', 'Build', 'Review', 'QA', 'Human', 'Done']
+
+function requiredWorkflowRole(status: WorkflowStatus): WorkflowRole | null {
+  switch (status) {
+    case 'Plan':
+      return 'planner'
+    case 'Design':
+      return 'designer'
+    case 'Coding':
+      return 'coder'
+    case 'Review':
+      return 'reviewer'
+    case 'QA':
+      return 'qa'
+    default:
+      return null
+  }
+}
 
 function sortGroupTasks(tasks: BoardTaskSummary[]) {
   return [...tasks].sort((left, right) => {
@@ -134,6 +153,11 @@ export default function TasksView() {
   const groupedTasks = useMemo(() => mapBoardGroups(tasks), [tasks])
   const visibleTaskCount = GROUP_ORDER.reduce((count, group) => count + groupedTasks[group].length, 0)
   const attentionCount = tasks.filter((task) => task.needs_attention || task.waiting_for_human).length
+  const requiredRole = selectedTask ? requiredWorkflowRole(selectedTask.task.status) : null
+  const assignableEmployees = useMemo(
+    () => (requiredRole ? employees.filter((employee) => employee.workflow_role === requiredRole) : []),
+    [employees, requiredRole],
+  )
 
   const openCreate = () => {
     setEditingDetail(null)
@@ -443,10 +467,22 @@ export default function TasksView() {
         width={480}
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          {employees.length === 0 ? (
+          {!selectedTask ? (
+            <div style={{ color: 'var(--text-tertiary)' }}>Choose a task first.</div>
+          ) : !requiredRole ? (
+            <div style={{ color: 'var(--text-tertiary)' }}>
+              {selectedTask.task.status === 'NeedsHuman'
+                ? 'This stage needs a human decision, not an agent assignment.'
+                : 'Done tasks cannot be assigned to an agent.'}
+            </div>
+          ) : assignableEmployees.length === 0 ? (
+            <div style={{ color: 'var(--text-tertiary)' }}>
+              No {requiredRole} agents are available. Add one in the Company view first.
+            </div>
+          ) : employees.length === 0 ? (
             <div style={{ color: 'var(--text-tertiary)' }}>No agents available. Create one in the Company view first.</div>
           ) : (
-            employees.map((employee) => {
+            assignableEmployees.map((employee) => {
               const busy = employee.status !== 'idle'
               const unavailable = !employee.backend_available
               const disabled = busy || unavailable || assigning
