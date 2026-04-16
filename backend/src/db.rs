@@ -2,7 +2,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::collections::HashMap;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 use crate::adapters::AdapterRegistry;
 
@@ -363,11 +363,41 @@ pub fn seed_employees(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     let employees = [
-        ("Alice", "Senior Frontend Engineer", "Frontend", "claude_code", "You are Alice, a senior frontend engineer. You specialize in React, TypeScript, and CSS. Write clean, accessible UI code."),
-        ("Bob", "Backend Architect", "Backend", "claude_code", "You are Bob, a backend architect. You specialize in API design, database optimization, and system architecture."),
-        ("Carol", "Quality Assurance Lead", "QA", "claude_code", "You are Carol, a QA lead. You write thorough test suites, find edge cases, and verify correctness."),
-        ("Dave", "Infrastructure Engineer", "DevOps", "claude_code", "You are Dave, an infrastructure engineer. You handle CI/CD, Docker, deployment, and monitoring."),
-        ("Eve", "Technical Writer", "Documentation", "claude_code", "You are Eve, a technical writer. You write clear documentation, API guides, and README files."),
+        (
+            "Alice",
+            "Senior Frontend Engineer",
+            "Frontend",
+            "claude_code",
+            "You are Alice, a senior frontend engineer. You specialize in React, TypeScript, and CSS. Write clean, accessible UI code.",
+        ),
+        (
+            "Bob",
+            "Backend Architect",
+            "Backend",
+            "claude_code",
+            "You are Bob, a backend architect. You specialize in API design, database optimization, and system architecture.",
+        ),
+        (
+            "Carol",
+            "Quality Assurance Lead",
+            "QA",
+            "claude_code",
+            "You are Carol, a QA lead. You write thorough test suites, find edge cases, and verify correctness.",
+        ),
+        (
+            "Dave",
+            "Infrastructure Engineer",
+            "DevOps",
+            "claude_code",
+            "You are Dave, an infrastructure engineer. You handle CI/CD, Docker, deployment, and monitoring.",
+        ),
+        (
+            "Eve",
+            "Technical Writer",
+            "Documentation",
+            "claude_code",
+            "You are Eve, a technical writer. You write clear documentation, API guides, and README files.",
+        ),
     ];
 
     for (name, role, department, backend, prompt) in employees {

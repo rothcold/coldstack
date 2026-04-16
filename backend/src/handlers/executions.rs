@@ -1,10 +1,10 @@
 use actix_web::web::Bytes;
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::Utc;
 use rusqlite::params;
 use std::sync::{
-    atomic::{AtomicI64, Ordering},
     Arc,
+    atomic::{AtomicI64, Ordering},
 };
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::broadcast;
@@ -39,7 +39,7 @@ pub async fn spawn_execution(
     };
 
     let child_id = process.child.id().unwrap_or(0);
-    
+
     // Store PID in DB
     if let Ok(conn) = state.db.get() {
         let _ = conn.execute(
@@ -78,7 +78,10 @@ pub async fn spawn_execution(
         let mut stdout_done = false;
         let mut stderr_done = false;
 
-        let emit_chunk = |line: String, is_stderr: bool, seq: &Arc<AtomicI64>, chunks_count: &Arc<AtomicI64>| {
+        let emit_chunk = |line: String,
+                          is_stderr: bool,
+                          seq: &Arc<AtomicI64>,
+                          chunks_count: &Arc<AtomicI64>| {
             let seq_value = seq.fetch_add(1, Ordering::Relaxed) + 1;
             let now = Utc::now().to_rfc3339();
             let chunk = if is_stderr {
@@ -155,7 +158,11 @@ pub async fn spawn_execution(
             let exit_code = exit_status.ok().and_then(|s| s.code()).unwrap_or(-1);
 
             let finished_at = Utc::now().to_rfc3339();
-            let status = if exit_code == 0 { "completed" } else { "failed" };
+            let status = if exit_code == 0 {
+                "completed"
+            } else {
+                "failed"
+            };
             let emp_status = if exit_code == 0 { "idle" } else { "error" };
 
             if let Ok(conn) = state_clone.db.get() {
@@ -262,9 +269,10 @@ pub async fn stream_execution(
             Err(_) => return HttpResponse::InternalServerError().finish(),
         };
 
-        let chunks: Vec<(i64, String, String)> = match stmt.query_map(params![execution_id, last_seq], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        }) {
+        let chunks: Vec<(i64, String, String)> = match stmt
+            .query_map(params![execution_id, last_seq], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            }) {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
             Err(_) => return HttpResponse::InternalServerError().finish(),
         };
@@ -334,10 +342,7 @@ pub async fn stream_execution(
 }
 
 /// Get output chunks for an execution: GET /api/executions/{id}/output
-pub async fn get_execution_output(
-    data: web::Data<AppState>,
-    path: web::Path<i64>,
-) -> HttpResponse {
+pub async fn get_execution_output(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
     let execution_id = path.into_inner();
 
     let result = (|| -> Result<Vec<OutputChunk>, AppError> {

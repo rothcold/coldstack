@@ -39,9 +39,7 @@ impl From<r2d2::Error> for AppError {
 impl AppError {
     pub fn to_response(&self) -> HttpResponse {
         match self {
-            AppError::Db(_) | AppError::Pool(_) => {
-                HttpResponse::InternalServerError().finish()
-            }
+            AppError::Db(_) | AppError::Pool(_) => HttpResponse::InternalServerError().finish(),
             AppError::NotFound => HttpResponse::NotFound().finish(),
             AppError::BadRequest(msg) => HttpResponse::BadRequest().body(msg.clone()),
             AppError::Conflict(msg) => HttpResponse::Conflict().body(msg.clone()),

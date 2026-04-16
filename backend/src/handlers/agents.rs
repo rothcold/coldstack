@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use chrono::Utc;
 use rusqlite::params;
 
@@ -38,10 +38,7 @@ pub async fn get_agents(data: web::Data<AppState>) -> HttpResponse {
     }
 }
 
-pub async fn create_agent(
-    data: web::Data<AppState>,
-    item: web::Json<CreateAgent>,
-) -> HttpResponse {
+pub async fn create_agent(data: web::Data<AppState>, item: web::Json<CreateAgent>) -> HttpResponse {
     let result = (|| -> Result<Agent, AppError> {
         let conn = data.db.get()?;
         let created_at = Utc::now().to_rfc3339();

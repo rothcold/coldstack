@@ -204,6 +204,7 @@ export default function CompanyView() {
             onClose={() => setSelectedId(null)}
             onEdit={() => openEdit(selectedEmployee)}
             onDelete={() => handleDelete(selectedEmployee)}
+            onRefreshEmployees={fetchEmployees}
           />
         </div>
       )}

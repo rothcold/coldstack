@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use chrono::Utc;
 use rusqlite::params;
 
@@ -32,6 +32,35 @@ pub(crate) fn build_employee_config(
     }
 }
 
+fn transition_employee_to_idle(
+    conn: &rusqlite::Connection,
+    employee_id: i64,
+    allowed_statuses: &[EmployeeStatus],
+    conflict_message: &str,
+) -> Result<(), AppError> {
+    let status_str: String = conn
+        .query_row(
+            "SELECT status FROM ai_employees WHERE id = ?1",
+            params![employee_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
+            other => AppError::Db(other),
+        })?;
+
+    let current_status = EmployeeStatus::from_str(&status_str);
+    if !allowed_statuses.contains(&current_status) {
+        return Err(AppError::Conflict(conflict_message.to_string()));
+    }
+
+    conn.execute(
+        "UPDATE ai_employees SET status = 'idle' WHERE id = ?1",
+        params![employee_id],
+    )?;
+    Ok(())
+}
+
 pub async fn get_employees(data: web::Data<AppState>) -> HttpResponse {
     let result = (|| -> Result<Vec<(Employee, String)>, AppError> {
         let conn = data.db.get()?;
@@ -48,17 +77,20 @@ pub async fn get_employees(data: web::Data<AppState>) -> HttpResponse {
                 let custom_prompt: Option<String> = row.get(6)?;
                 Ok((
                     Employee {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    role: row.get(2)?,
-                    workflow_role,
-                    department: row.get(4)?,
-                    agent_backend: agent_backend.clone(),
-                    backend_available: false,
-                    custom_prompt: custom_prompt.clone(),
-                    system_prompt: compose_employee_prompt(workflow_role, custom_prompt.as_deref()),
-                    status: EmployeeStatus::from_str(&status_str),
-                    created_at: row.get(8)?,
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        role: row.get(2)?,
+                        workflow_role,
+                        department: row.get(4)?,
+                        agent_backend: agent_backend.clone(),
+                        backend_available: false,
+                        custom_prompt: custom_prompt.clone(),
+                        system_prompt: compose_employee_prompt(
+                            workflow_role,
+                            custom_prompt.as_deref(),
+                        ),
+                        status: EmployeeStatus::from_str(&status_str),
+                        created_at: row.get(8)?,
                     },
                     agent_backend,
                 ))
@@ -83,10 +115,7 @@ pub async fn get_employees(data: web::Data<AppState>) -> HttpResponse {
     }
 }
 
-pub async fn get_employee(
-    data: web::Data<AppState>,
-    path: web::Path<i64>,
-) -> HttpResponse {
+pub async fn get_employee(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
     let id = path.into_inner();
 
     let result = (|| -> Result<Employee, AppError> {
@@ -245,18 +274,18 @@ pub async fn update_employee(
     }
 }
 
-pub async fn delete_employee(
-    data: web::Data<AppState>,
-    path: web::Path<i64>,
-) -> HttpResponse {
+pub async fn delete_employee(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
     let id = path.into_inner();
 
     let result = (|| -> Result<Vec<i64>, AppError> {
         let conn = data.db.get()?;
 
         // Get running executions to cancel them
-        let mut stmt = conn.prepare("SELECT id FROM task_executions WHERE employee_id = ?1 AND status = 'running'")?;
-        let running_ids: Vec<i64> = stmt.query_map(params![id], |row| row.get(0))?
+        let mut stmt = conn.prepare(
+            "SELECT id FROM task_executions WHERE employee_id = ?1 AND status = 'running'",
+        )?;
+        let running_ids: Vec<i64> = stmt
+            .query_map(params![id], |row| row.get(0))?
             .filter_map(Result::ok)
             .collect();
 
@@ -288,10 +317,7 @@ pub async fn delete_employee(
     }
 }
 
-pub async fn assign_task(
-    data: web::Data<AppState>,
-    path: web::Path<(i64, i64)>,
-) -> HttpResponse {
+pub async fn assign_task(data: web::Data<AppState>, path: web::Path<(i64, i64)>) -> HttpResponse {
     let (employee_id, task_id) = path.into_inner();
 
     let result = (|| -> Result<(Execution, TaskInfo, EmployeeConfig, String), AppError> {
@@ -435,10 +461,7 @@ pub async fn get_current_execution(
     }
 }
 
-pub async fn cancel_execution(
-    data: web::Data<AppState>,
-    path: web::Path<i64>,
-) -> HttpResponse {
+pub async fn cancel_execution(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
     let execution_id = path.into_inner();
 
     let result = (|| -> Result<Execution, AppError> {
@@ -457,9 +480,7 @@ pub async fn cancel_execution(
             })?;
 
         if status_str != "running" {
-            return Err(AppError::Conflict(
-                "Execution is not running".to_string(),
-            ));
+            return Err(AppError::Conflict("Execution is not running".to_string()));
         }
 
         let finished_at = Utc::now().to_rfc3339();
@@ -469,10 +490,15 @@ pub async fn cancel_execution(
             params![finished_at, execution_id],
         )?;
 
-        // Reset employee to idle
-        conn.execute(
-            "UPDATE ai_employees SET status = 'idle' WHERE id = ?1",
-            params![employee_id],
+        transition_employee_to_idle(
+            &conn,
+            employee_id,
+            &[
+                EmployeeStatus::Working,
+                EmployeeStatus::Error,
+                EmployeeStatus::Idle,
+            ],
+            "Employee cannot be reset to idle for this execution",
         )?;
 
         Ok(Execution {
@@ -499,10 +525,69 @@ pub async fn cancel_execution(
     }
 }
 
-pub async fn get_executions(
-    data: web::Data<AppState>,
-    path: web::Path<i64>,
-) -> HttpResponse {
+pub async fn reset_employee(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
+    let employee_id = path.into_inner();
+
+    let result = (|| -> Result<Employee, AppError> {
+        let conn = data.db.get()?;
+
+        let running_execution_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM task_executions WHERE employee_id = ?1 AND status = 'running' LIMIT 1",
+                params![employee_id],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+
+        if running_execution_exists {
+            return Err(AppError::Conflict(
+                "Employee still has a running execution. Stop it first.".to_string(),
+            ));
+        }
+
+        transition_employee_to_idle(
+            &conn,
+            employee_id,
+            &[EmployeeStatus::Working, EmployeeStatus::Error],
+            "Employee is already idle",
+        )?;
+
+        conn.query_row(
+            "SELECT id, name, role, workflow_role, department, agent_backend, custom_prompt, status, created_at FROM ai_employees WHERE id = ?1",
+            params![employee_id],
+            |row| {
+                let workflow_role: String = row.get(3)?;
+                let agent_backend: String = row.get(5)?;
+                let workflow_role = WorkflowRole::from_str(&workflow_role);
+                let custom_prompt: Option<String> = row.get(6)?;
+                Ok(Employee {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    role: row.get(2)?,
+                    workflow_role,
+                    department: row.get(4)?,
+                    backend_available: data.adapters.is_available(&agent_backend),
+                    agent_backend,
+                    custom_prompt: custom_prompt.clone(),
+                    system_prompt: compose_employee_prompt(workflow_role, custom_prompt.as_deref()),
+                    status: EmployeeStatus::Idle,
+                    created_at: row.get(8)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
+            other => AppError::Db(other),
+        })
+    })();
+
+    match result {
+        Ok(employee) => HttpResponse::Ok().json(employee),
+        Err(e) => e.to_response(),
+    }
+}
+
+pub async fn get_executions(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
     let employee_id = path.into_inner();
 
     let result = (|| -> Result<Vec<Execution>, AppError> {
