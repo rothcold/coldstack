@@ -2,8 +2,8 @@ pub mod claude_code;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use tokio::process::Child;
 use tokio::io::BufReader;
+use tokio::process::Child;
 
 pub struct TaskInfo {
     pub title: String,
@@ -23,7 +23,11 @@ pub struct AgentProcess {
 
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
-    async fn execute(&self, task: &TaskInfo, employee: &EmployeeConfig) -> Result<AgentProcess, String>;
+    async fn execute(
+        &self,
+        task: &TaskInfo,
+        employee: &EmployeeConfig,
+    ) -> Result<AgentProcess, String>;
     fn is_available(&self) -> bool;
 }
 
@@ -38,7 +42,9 @@ impl AdapterRegistry {
         };
         let claude = claude_code::ClaudeCodeAdapter;
         if claude.is_available() {
-            registry.adapters.insert("claude_code".to_string(), Box::new(claude));
+            registry
+                .adapters
+                .insert("claude_code".to_string(), Box::new(claude));
         }
         registry
     }

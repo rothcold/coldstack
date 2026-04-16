@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Employee, Execution } from '../types'
 import LiveTerminal from './LiveTerminal'
 
@@ -7,6 +7,7 @@ interface EmployeeDetailProps {
   onClose: () => void
   onEdit: () => void
   onDelete: () => void
+  onRefreshEmployees: () => Promise<void>
 }
 
 const statusPillColor = (status: string): React.CSSProperties => {
@@ -20,18 +21,43 @@ const statusPillColor = (status: string): React.CSSProperties => {
   }
 }
 
-export default function EmployeeDetail({ employee, onClose, onEdit, onDelete }: EmployeeDetailProps) {
+export default function EmployeeDetail({
+  employee,
+  onClose,
+  onEdit,
+  onDelete,
+  onRefreshEmployees,
+}: EmployeeDetailProps) {
   const [executions, setExecutions] = useState<Execution[]>([])
+  const [executionsLoaded, setExecutionsLoaded] = useState(false)
+  const [actionBusy, setActionBusy] = useState<'stop' | 'reset' | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  const loadExecutions = useCallback(async () => {
+    setExecutionsLoaded(false)
+    try {
+      const res = await fetch(`/api/employees/${employee.id}/executions`)
+      const data = await res.json()
+      setExecutions(data)
+    } catch (err) {
+      console.error('Failed to fetch executions:', err)
+    } finally {
+      setExecutionsLoaded(true)
+    }
+  }, [employee.id])
 
   useEffect(() => {
-    fetch(`/api/employees/${employee.id}/executions`)
-      .then(res => res.json())
-      .then(data => setExecutions(data))
-      .catch(err => console.error('Failed to fetch executions:', err))
-  }, [employee.id])
+    void loadExecutions()
+    setActionError(null)
+  }, [loadExecutions])
 
   const runningExecution = executions.find(e => e.status === 'running')
   const latestExecution = executions[0]
+  const canStopExecution = Boolean(runningExecution)
+  const canResetAgent = useMemo(() => {
+    if (!executionsLoaded) return false
+    return employee.status === 'error' || (employee.status === 'working' && !runningExecution)
+  }, [employee.status, executionsLoaded, runningExecution])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -40,6 +66,45 @@ export default function EmployeeDetail({ employee, onClose, onEdit, onDelete }: 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
+
+  const handleStopExecution = async () => {
+    if (!runningExecution) return
+    setActionBusy('stop')
+    setActionError(null)
+    try {
+      const res = await fetch(`/api/executions/${runningExecution.id}/cancel`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const message = await res.text()
+        throw new Error(message || 'Failed to stop execution')
+      }
+      await Promise.all([loadExecutions(), onRefreshEmployees()])
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to stop execution')
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
+  const handleResetAgent = async () => {
+    setActionBusy('reset')
+    setActionError(null)
+    try {
+      const res = await fetch(`/api/employees/${employee.id}/reset`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const message = await res.text()
+        throw new Error(message || 'Failed to reset agent')
+      }
+      await Promise.all([loadExecutions(), onRefreshEmployees()])
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to reset agent')
+    } finally {
+      setActionBusy(null)
+    }
+  }
 
   return (
     <div
@@ -83,6 +148,38 @@ export default function EmployeeDetail({ employee, onClose, onEdit, onDelete }: 
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.4rem', flexShrink: 0 }}>
+          {canStopExecution && (
+            <button
+              onClick={handleStopExecution}
+              disabled={actionBusy !== null}
+              style={{
+                background: 'var(--status-offline)',
+                border: '1px solid var(--status-offline)',
+                color: 'white',
+                padding: '0.4rem 0.75rem',
+                fontSize: '0.8rem',
+                opacity: actionBusy ? 0.7 : 1,
+              }}
+            >
+              {actionBusy === 'stop' ? 'Stopping…' : 'Stop Execution'}
+            </button>
+          )}
+          {canResetAgent && (
+            <button
+              onClick={handleResetAgent}
+              disabled={actionBusy !== null}
+              style={{
+                background: 'var(--bg-secondary)',
+                border: '1px solid var(--border-color)',
+                color: 'var(--text-primary)',
+                padding: '0.4rem 0.75rem',
+                fontSize: '0.8rem',
+                opacity: actionBusy ? 0.7 : 1,
+              }}
+            >
+              {actionBusy === 'reset' ? 'Resetting…' : 'Reset Agent'}
+            </button>
+          )}
           <button
             onClick={onEdit}
             style={{
@@ -122,6 +219,22 @@ export default function EmployeeDetail({ employee, onClose, onEdit, onDelete }: 
           </button>
         </div>
       </div>
+
+      {actionError && (
+        <div
+          role="alert"
+          style={{
+            background: 'var(--status-offline-bg)',
+            color: 'var(--status-offline)',
+            padding: '0.75rem 0.9rem',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid rgba(185, 28, 28, 0.18)',
+            fontSize: '0.82rem',
+          }}
+        >
+          {actionError}
+        </div>
+      )}
 
       <Section title="System Prompt">
         <div

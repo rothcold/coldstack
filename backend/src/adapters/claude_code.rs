@@ -10,7 +10,13 @@ pub struct ClaudeCodeAdapter;
 
 fn sanitize_path(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -39,8 +45,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
         task: &TaskInfo,
         employee: &EmployeeConfig,
     ) -> Result<AgentProcess, String> {
-        let binary = Self::find_claude_binary()
-            .ok_or_else(|| "claude CLI not found in PATH".to_string())?;
+        let binary =
+            Self::find_claude_binary().ok_or_else(|| "claude CLI not found in PATH".to_string())?;
 
         let prompt = if let Some(ref sys_prompt) = employee.system_prompt {
             format!(
@@ -54,7 +60,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
             )
         };
 
-        let workspace: PathBuf = PathBuf::from("agent_workspaces").join(sanitize_path(&task.task_id));
+        let workspace: PathBuf =
+            PathBuf::from("agent_workspaces").join(sanitize_path(&task.task_id));
         std::fs::create_dir_all(&workspace)
             .map_err(|e| format!("Failed to create workspace {:?}: {}", workspace, e))?;
 

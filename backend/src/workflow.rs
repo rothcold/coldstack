@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::errors::AppError;
 use crate::models::{
@@ -69,7 +69,10 @@ pub fn normalize_custom_prompt(custom_prompt: Option<String>) -> Option<String> 
 }
 
 pub fn compose_employee_prompt(role: WorkflowRole, custom_prompt: Option<&str>) -> String {
-    match custom_prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+    match custom_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
         Some(custom_prompt) => format!("{}\n\n{}", default_prompt_for_role(role), custom_prompt),
         None => default_prompt_for_role(role).to_string(),
     }
@@ -134,15 +137,69 @@ fn validate_actor(
     }
 
     let allowed = match (from_status, target, action, role, actor_type) {
-        (WorkflowStatus::Plan, WorkflowStatus::Design, WorkflowAction::Advance, WorkflowRole::Planner, WorkflowActorType::Employee) => true,
-        (WorkflowStatus::Design, WorkflowStatus::Coding, WorkflowAction::Advance, WorkflowRole::Designer, WorkflowActorType::Employee) => true,
-        (WorkflowStatus::Coding, WorkflowStatus::Review, WorkflowAction::Advance, WorkflowRole::Coder, WorkflowActorType::Employee) => true,
-        (WorkflowStatus::Review, WorkflowStatus::QA, WorkflowAction::Advance, WorkflowRole::Reviewer, WorkflowActorType::Employee) => true,
-        (WorkflowStatus::Review, WorkflowStatus::Coding, WorkflowAction::Reject, WorkflowRole::Reviewer, WorkflowActorType::Employee) => true,
-        (WorkflowStatus::QA, WorkflowStatus::NeedsHuman, WorkflowAction::Advance, WorkflowRole::Qa, WorkflowActorType::Employee) => true,
-        (WorkflowStatus::QA, WorkflowStatus::Coding, WorkflowAction::Reject, WorkflowRole::Qa, WorkflowActorType::Employee) => true,
-        (WorkflowStatus::NeedsHuman, WorkflowStatus::Done, WorkflowAction::Advance, WorkflowRole::Human, WorkflowActorType::Human) => true,
-        (WorkflowStatus::NeedsHuman, WorkflowStatus::Coding, WorkflowAction::Reject, WorkflowRole::Human, WorkflowActorType::Human) => true,
+        (
+            WorkflowStatus::Plan,
+            WorkflowStatus::Design,
+            WorkflowAction::Advance,
+            WorkflowRole::Planner,
+            WorkflowActorType::Employee,
+        ) => true,
+        (
+            WorkflowStatus::Design,
+            WorkflowStatus::Coding,
+            WorkflowAction::Advance,
+            WorkflowRole::Designer,
+            WorkflowActorType::Employee,
+        ) => true,
+        (
+            WorkflowStatus::Coding,
+            WorkflowStatus::Review,
+            WorkflowAction::Advance,
+            WorkflowRole::Coder,
+            WorkflowActorType::Employee,
+        ) => true,
+        (
+            WorkflowStatus::Review,
+            WorkflowStatus::QA,
+            WorkflowAction::Advance,
+            WorkflowRole::Reviewer,
+            WorkflowActorType::Employee,
+        ) => true,
+        (
+            WorkflowStatus::Review,
+            WorkflowStatus::Coding,
+            WorkflowAction::Reject,
+            WorkflowRole::Reviewer,
+            WorkflowActorType::Employee,
+        ) => true,
+        (
+            WorkflowStatus::QA,
+            WorkflowStatus::NeedsHuman,
+            WorkflowAction::Advance,
+            WorkflowRole::Qa,
+            WorkflowActorType::Employee,
+        ) => true,
+        (
+            WorkflowStatus::QA,
+            WorkflowStatus::Coding,
+            WorkflowAction::Reject,
+            WorkflowRole::Qa,
+            WorkflowActorType::Employee,
+        ) => true,
+        (
+            WorkflowStatus::NeedsHuman,
+            WorkflowStatus::Done,
+            WorkflowAction::Advance,
+            WorkflowRole::Human,
+            WorkflowActorType::Human,
+        ) => true,
+        (
+            WorkflowStatus::NeedsHuman,
+            WorkflowStatus::Coding,
+            WorkflowAction::Reject,
+            WorkflowRole::Human,
+            WorkflowActorType::Human,
+        ) => true,
         _ => false,
     };
 
@@ -181,7 +238,10 @@ pub fn load_task(conn: &Connection, id: i64) -> Result<Task, AppError> {
     })
 }
 
-pub fn load_workflow_events(conn: &Connection, task_id: i64) -> Result<Vec<WorkflowEvent>, AppError> {
+pub fn load_workflow_events(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Vec<WorkflowEvent>, AppError> {
     let mut stmt = conn.prepare(
         "SELECT id, task_id, from_status, to_status, actor_type, actor_id, actor_label, action, note, evidence_text, created_at
          FROM task_workflow_events
@@ -240,7 +300,11 @@ pub fn load_task_detail(conn: &Connection, task_id: i64) -> Result<TaskDetail, A
     })
 }
 
-pub fn transition_task(conn: &mut Connection, task_id: i64, req: TransitionTaskRequest) -> Result<TaskDetail, AppError> {
+pub fn transition_task(
+    conn: &mut Connection,
+    task_id: i64,
+    req: TransitionTaskRequest,
+) -> Result<TaskDetail, AppError> {
     let tx = conn.transaction()?;
     let task = load_task(&tx, task_id)?;
 
@@ -258,9 +322,9 @@ pub fn transition_task(conn: &mut Connection, task_id: i64, req: TransitionTaskR
     let role = if req.actor_type == WorkflowActorType::Human {
         WorkflowRole::Human
     } else {
-        let actor_id = req
-            .actor_id
-            .ok_or_else(|| AppError::BadRequest("actor_id is required for employees".to_string()))?;
+        let actor_id = req.actor_id.ok_or_else(|| {
+            AppError::BadRequest("actor_id is required for employees".to_string())
+        })?;
         tx.query_row(
             "SELECT workflow_role FROM ai_employees WHERE id = ?1",
             params![actor_id],
@@ -283,7 +347,11 @@ pub fn transition_task(conn: &mut Connection, task_id: i64, req: TransitionTaskR
     }
 
     let next_status = validate_actor(role, req.actor_type, req.action, task.status, req.to_status)?;
-    let archived = if req.action == WorkflowAction::Archive { 1 } else { task.archived as i32 };
+    let archived = if req.action == WorkflowAction::Archive {
+        1
+    } else {
+        task.archived as i32
+    };
     let status = if req.action == WorkflowAction::Archive {
         WorkflowStatus::Done
     } else {

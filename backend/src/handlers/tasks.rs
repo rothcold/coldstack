@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use chrono::Utc;
 use rusqlite::params;
 
@@ -149,10 +149,7 @@ pub async fn get_task_detail(data: web::Data<AppState>, path: web::Path<i64>) ->
     }
 }
 
-pub async fn create_task(
-    data: web::Data<AppState>,
-    item: web::Json<CreateTask>,
-) -> HttpResponse {
+pub async fn create_task(data: web::Data<AppState>, item: web::Json<CreateTask>) -> HttpResponse {
     let result = (|| -> Result<Task, AppError> {
         let conn = data.db.get()?;
         let created_at_str = Utc::now().to_rfc3339();
