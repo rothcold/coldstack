@@ -29,6 +29,7 @@ describe('TasksView assignment filtering', () => {
               archived: false,
               needs_attention: false,
               waiting_for_human: false,
+              waiting_for_agent: false,
               rejection_count: 0,
               latest_event_summary: 'Ready for review',
             },
@@ -73,6 +74,7 @@ describe('TasksView assignment filtering', () => {
               task_id: 'T-REVIEW',
               title: 'Review this task',
               description: 'Needs a reviewer assignment.',
+              source: '/tmp/project',
               archived: false,
               status: 'Review',
               assignee: null,
@@ -82,6 +84,7 @@ describe('TasksView assignment filtering', () => {
             events: [],
             current_action_label: 'Needs review',
             current_action_hint: null,
+            waiting_for_agent: false,
           }),
         })
       }

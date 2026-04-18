@@ -33,6 +33,7 @@ describe('TasksView mobile workflow behavior', () => {
               archived: false,
               needs_attention: false,
               waiting_for_human: true,
+              waiting_for_agent: false,
               rejection_count: 0,
               latest_event_summary: 'Needs your decision',
             },
@@ -54,6 +55,7 @@ describe('TasksView mobile workflow behavior', () => {
               task_id: 'T-MOBILE',
               title: 'Mobile detail',
               description: 'Open in sheet',
+              source: '/tmp/project',
               archived: false,
               status: 'NeedsHuman',
               assignee: 'Owner',
@@ -63,6 +65,7 @@ describe('TasksView mobile workflow behavior', () => {
             events: [],
             current_action_label: 'Needs your decision',
             current_action_hint: 'Only you can close the loop.',
+            waiting_for_agent: false,
           }),
         })
       }

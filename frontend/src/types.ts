@@ -35,6 +35,9 @@ export interface Task {
   task_id: string
   title: string
   description: string
+  source?: string | null
+  source_branch?: string | null
+  branch_name?: string | null
   archived: boolean
   status: WorkflowStatus
   assignee?: string | null
@@ -52,6 +55,7 @@ export interface BoardTaskSummary {
   archived: boolean
   needs_attention: boolean
   waiting_for_human: boolean
+  waiting_for_agent: boolean
   rejection_count: number
   latest_event_summary?: string | null
 }
@@ -75,6 +79,7 @@ export interface TaskDetail {
   events: WorkflowEvent[]
   current_action_label: string
   current_action_hint?: string | null
+  waiting_for_agent: boolean
 }
 
 export interface TransitionPayload {
@@ -95,6 +100,8 @@ export interface TransitionResponse {
 export interface CreateTaskPayload {
   title: string
   description: string
+  source: string
+  source_branch?: string
   assignee?: string | null
 }
 
@@ -102,7 +109,13 @@ export interface UpdateTaskPayload {
   task_id?: string
   title?: string
   description?: string
+  source?: string
+  source_branch?: string
   assignee?: string | null
+}
+
+export interface PublishTaskBranchResponse {
+  branch_name: string
 }
 
 export interface Agent {

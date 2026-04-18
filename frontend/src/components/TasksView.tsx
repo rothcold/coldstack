@@ -19,12 +19,16 @@ import WorkflowBoard from './WorkflowBoard'
 type TaskFormState = {
   title: string
   description: string
+  source: string
+  source_branch: string
   assignee: string
 }
 
 const EMPTY_FORM: TaskFormState = {
   title: '',
   description: '',
+  source: '',
+  source_branch: 'main',
   assignee: '',
 }
 
@@ -99,6 +103,7 @@ export default function TasksView() {
   const [assignModalOpen, setAssignModalOpen] = useState(false)
   const [assigning, setAssigning] = useState(false)
   const [assignError, setAssignError] = useState<string | null>(null)
+  const [publishing, setPublishing] = useState(false)
   const detailPanelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -131,6 +136,18 @@ export default function TasksView() {
   }, [])
 
   useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      void fetchTasks()
+      void fetchEmployees()
+      if (selectedTaskId != null) {
+        void fetchTaskDetail(selectedTaskId)
+      }
+    }, 4000)
+
+    return () => window.clearInterval(intervalId)
+  }, [selectedTaskId])
+
+  useEffect(() => {
     if (selectedTaskId == null) {
       setSelectedTask(null)
       return
@@ -152,7 +169,7 @@ export default function TasksView() {
 
   const groupedTasks = useMemo(() => mapBoardGroups(tasks), [tasks])
   const visibleTaskCount = GROUP_ORDER.reduce((count, group) => count + groupedTasks[group].length, 0)
-  const attentionCount = tasks.filter((task) => task.needs_attention || task.waiting_for_human).length
+  const attentionCount = tasks.filter((task) => task.needs_attention || task.waiting_for_human || task.waiting_for_agent).length
   const requiredRole = selectedTask ? requiredWorkflowRole(selectedTask.task.status) : null
   const assignableEmployees = useMemo(
     () => (requiredRole ? employees.filter((employee) => employee.workflow_role === requiredRole) : []),
@@ -172,6 +189,8 @@ export default function TasksView() {
     setForm({
       title: selectedTask.task.title,
       description: selectedTask.task.description,
+      source: selectedTask.task.source ?? '',
+      source_branch: selectedTask.task.source_branch ?? 'main',
       assignee: selectedTask.task.assignee ?? '',
     })
     setError(null)
@@ -189,6 +208,14 @@ export default function TasksView() {
       setError('Title is required.')
       return
     }
+    if (!form.source.trim()) {
+      setError('Source is required.')
+      return
+    }
+    if (!form.source_branch.trim()) {
+      setError('Source branch is required.')
+      return
+    }
 
     setSaving(true)
     setError(null)
@@ -196,6 +223,8 @@ export default function TasksView() {
       const payload: CreateTaskPayload | UpdateTaskPayload = {
         title: form.title.trim(),
         description: form.description.trim(),
+        source: form.source.trim(),
+        source_branch: form.source_branch.trim(),
         assignee: form.assignee || null,
       }
 
@@ -254,6 +283,7 @@ export default function TasksView() {
         throw new Error(message || `${response.status} ${response.statusText}`)
       }
       setAssignModalOpen(false)
+      await fetchTasks()
       await fetchEmployees()
       await fetchTaskDetail(selectedTask.task.id)
     } catch (err) {
@@ -281,6 +311,27 @@ export default function TasksView() {
     const data = await response.json()
     setSelectedTask(data.task)
     await fetchTasks()
+  }
+
+  const handlePublishBranch = async () => {
+    if (!selectedTask) return
+    setPublishing(true)
+    try {
+      const response = await fetch(`/api/tasks/${selectedTask.task.id}/publish`, {
+        method: 'POST',
+      })
+      if (!response.ok) {
+        const message = await response.text()
+        throw new Error(message || 'Push failed')
+      }
+      const data = await response.json()
+      await fetchTaskDetail(selectedTask.task.id)
+      window.alert(`Pushed ${data.branch_name}`)
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Push failed')
+    } finally {
+      setPublishing(false)
+    }
   }
 
   return (
@@ -384,6 +435,8 @@ export default function TasksView() {
               onTransition={handleTransition}
               onReject={setRejectPayload}
               onAssign={openAssignModal}
+              onPublishBranch={handlePublishBranch}
+              publishing={publishing}
             />
           </div>
         )}
@@ -402,6 +455,8 @@ export default function TasksView() {
             onTransition={handleTransition}
             onReject={setRejectPayload}
             onAssign={openAssignModal}
+            onPublishBranch={handlePublishBranch}
+            publishing={publishing}
             compact
           />
         </Modal>
@@ -423,6 +478,20 @@ export default function TasksView() {
               onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
               rows={5}
               style={{ resize: 'vertical', minHeight: '8rem' }}
+            />
+          </Field>
+          <Field label="Source Git URL / Path">
+            <input
+              value={form.source}
+              onChange={(event) => setForm((current) => ({ ...current, source: event.target.value }))}
+              placeholder="https://github.com/org/repo.git or /path/to/repo"
+            />
+          </Field>
+          <Field label="Source Branch">
+            <input
+              value={form.source_branch}
+              onChange={(event) => setForm((current) => ({ ...current, source_branch: event.target.value }))}
+              placeholder="main"
             />
           </Field>
           <Field label="Owner">
@@ -557,6 +626,8 @@ function TaskDetailShell({
   onTransition,
   onReject,
   onAssign,
+  onPublishBranch,
+  publishing,
   compact = false,
 }: {
   detail: TaskDetail | null
@@ -569,6 +640,8 @@ function TaskDetailShell({
   onTransition: (payload: TransitionPayload) => void
   onReject: (payload: TransitionPayload) => void
   onAssign: () => void
+  onPublishBranch: () => void
+  publishing: boolean
   compact?: boolean
 }) {
   if (!detail) {
@@ -622,6 +695,14 @@ function TaskDetailShell({
           </button>
           <button
             type="button"
+            onClick={onPublishBranch}
+            disabled={publishing}
+            style={{ background: 'transparent', color: 'var(--text-primary)', border: '1px solid var(--border-color)', minHeight: 44 }}
+          >
+            {publishing ? 'Pushing…' : 'Push Branch'}
+          </button>
+          <button
+            type="button"
             onClick={onEdit}
             style={{ background: 'transparent', color: 'var(--text-primary)', border: '1px solid var(--border-color)', minHeight: 44 }}
           >
@@ -644,6 +725,16 @@ function TaskDetailShell({
 
       <div style={{ fontSize: '0.92rem', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>
         {detail.task.description || 'No description provided.'}
+      </div>
+
+      <div style={{ fontSize: '0.84rem', color: 'var(--text-tertiary)', wordBreak: 'break-all' }}>
+        Source: {detail.task.source || 'Missing source'}
+      </div>
+      <div style={{ fontSize: '0.84rem', color: 'var(--text-tertiary)', wordBreak: 'break-all' }}>
+        Source branch: {detail.task.source_branch || 'main'}
+      </div>
+      <div style={{ fontSize: '0.84rem', color: 'var(--text-tertiary)', wordBreak: 'break-all' }}>
+        Branch: {detail.task.branch_name || 'Missing branch'}
       </div>
 
       <TransitionActions

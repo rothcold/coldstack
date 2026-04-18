@@ -16,6 +16,15 @@ function statusTone(task: BoardTaskSummary) {
       label: 'Needs your decision',
     }
   }
+  if (task.waiting_for_agent) {
+    return {
+      border: 'rgba(8, 145, 178, 0.3)',
+      background: 'rgba(8, 145, 178, 0.07)',
+      badgeBg: 'rgba(8, 145, 178, 0.14)',
+      badgeColor: 'rgb(14, 116, 144)',
+      label: 'Waiting for agent',
+    }
+  }
   if (task.needs_attention) {
     return {
       border: 'var(--card-returned-border)',
