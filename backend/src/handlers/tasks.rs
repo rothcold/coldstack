@@ -11,10 +11,15 @@ fn allocate_branch_name(
     conn: &rusqlite::Connection,
     title: &str,
     description: &str,
+    attempt: usize,
 ) -> Result<String, AppError> {
     let base = crate::task_source::default_branch_name(title, description);
-    let mut candidate = base.clone();
-    let mut suffix = 2;
+    let mut candidate = if attempt == 0 {
+        base.clone()
+    } else {
+        format!("{}-{}", base, attempt + 1)
+    };
+    let mut suffix = attempt + 2;
 
     loop {
         let exists: bool = conn
@@ -229,24 +234,47 @@ pub async fn create_task(data: web::Data<AppState>, item: web::Json<CreateTask>)
                 "Task source branch is required".to_string(),
             ));
         }
-        let branch_name = allocate_branch_name(&conn, &item.title, &item.description)?;
-
         let task_id = item
             .task_id
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("T-{}", uuid::Uuid::new_v4()));
 
-        conn.execute(
-            "INSERT INTO tasks (task_id, title, description, source, source_branch, branch_name, archived, status, assignee, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9)",
-            params![task_id, item.title, item.description, source, source_branch, branch_name, default_status.as_str(), item.assignee, created_at_str],
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(ref err, _) if err.extended_code == 2067 => {
-                AppError::Conflict("Task ID already exists".to_string())
+        let mut branch_name = String::new();
+        let mut inserted = false;
+
+        for attempt in 0..10 {
+            branch_name = allocate_branch_name(&conn, &item.title, &item.description, attempt)?;
+            match conn.execute(
+                "INSERT INTO tasks (task_id, title, description, source, source_branch, branch_name, archived, status, assignee, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9)",
+                params![task_id, item.title, item.description, source, source_branch, branch_name, default_status.as_str(), item.assignee, created_at_str],
+            ) {
+                Ok(_) => {
+                    inserted = true;
+                    break;
+                }
+                Err(rusqlite::Error::SqliteFailure(ref err, _)) if err.extended_code == 2067 => {
+                    let task_id_exists: bool = conn
+                        .query_row(
+                            "SELECT 1 FROM tasks WHERE task_id = ?1 LIMIT 1",
+                            params![task_id],
+                            |_| Ok(true),
+                        )
+                        .optional()?
+                        .unwrap_or(false);
+                    if task_id_exists {
+                        return Err(AppError::Conflict("Task ID already exists".to_string()));
+                    }
+                }
+                Err(other) => return Err(AppError::Db(other)),
             }
-            other => AppError::Db(other),
-        })?;
+        }
+
+        if !inserted {
+            return Err(AppError::Conflict(
+                "Could not allocate a unique task branch".to_string(),
+            ));
+        }
 
         let id = conn.last_insert_rowid();
         Ok(Task {
@@ -310,7 +338,7 @@ pub async fn update_task(
             None => existing.source_branch,
         };
         let branch_name = existing.branch_name.clone().or_else(|| {
-            allocate_branch_name(&conn, &new_title, &new_desc).ok()
+            allocate_branch_name(&conn, &new_title, &new_desc, 0).ok()
         });
         let new_assignee = item.assignee.clone().unwrap_or(existing.assignee);
 

@@ -110,6 +110,10 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     if !columns.contains(&"branch_name".to_string()) {
         conn.execute("ALTER TABLE tasks ADD COLUMN branch_name TEXT", [])?;
     }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_branch_name ON tasks(branch_name)",
+        [],
+    )?;
     if !columns.contains(&"archived".to_string()) {
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",

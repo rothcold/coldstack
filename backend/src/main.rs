@@ -177,6 +177,14 @@ mod tests {
         assert!(task_cols.contains(&"archived".to_string()));
         assert!(task_cols.contains(&"status".to_string()));
         assert!(task_cols.contains(&"source_branch".to_string()));
+        let branch_index_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_tasks_branch_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch_index_exists, 1);
 
         let mut stmt = conn.prepare("PRAGMA table_info(ai_employees)").unwrap();
         let employee_cols: Vec<String> = stmt
@@ -188,6 +196,29 @@ mod tests {
         assert!(employee_cols.contains(&"custom_prompt".to_string()));
         assert!(task_cols.contains(&"auto_handoff_pending".to_string()));
         assert!(task_cols.contains(&"auto_handoff_claimed_at".to_string()));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_branch_name_unique_index_rejects_duplicates() {
+        let pool = setup_pool();
+        let conn = pool.get().unwrap();
+
+        conn.execute(
+            "INSERT INTO tasks (task_id, title, description, source, source_branch, branch_name, archived, status, created_at)
+             VALUES ('T-ONE', 'One', '', '/tmp/project', 'main', 'task/shared-branch', 0, 'Plan', '2026-04-18T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let error = conn
+            .execute(
+                "INSERT INTO tasks (task_id, title, description, source, source_branch, branch_name, archived, status, created_at)
+                 VALUES ('T-TWO', 'Two', '', '/tmp/project', 'main', 'task/shared-branch', 0, 'Plan', '2026-04-18T00:00:01Z')",
+                [],
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, rusqlite::Error::SqliteFailure(_, _)));
     }
 
     #[::core::prelude::v1::test]

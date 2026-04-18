@@ -17,6 +17,10 @@ pub fn workspace_path(task_id: &str) -> PathBuf {
     PathBuf::from("agent_workspaces").join(sanitize_path(task_id))
 }
 
+fn workspace_metadata_path(workspace: &Path) -> PathBuf {
+    workspace.join(".coldstack-source")
+}
+
 pub fn slugify_branch_label(value: &str) -> String {
     let mut slug = value
         .trim()
@@ -53,10 +57,17 @@ pub async fn ensure_workspace(
     branch: &str,
 ) -> Result<PathBuf, String> {
     let workspace = workspace_path(task_id);
+    let expected_source = normalize_source(source)?;
+    let expected_branch = source_branch.trim().to_string();
 
     if workspace.join(".git").exists() {
-        ensure_branch_checked_out(&workspace, branch).await?;
-        return Ok(workspace);
+        if workspace_needs_reclone(&workspace, &expected_source, &expected_branch).await? {
+            std::fs::remove_dir_all(&workspace)
+                .map_err(|e| format!("Failed to recreate workspace {:?}: {}", workspace, e))?;
+        } else {
+            ensure_branch_checked_out(&workspace, branch).await?;
+            return Ok(workspace);
+        }
     }
 
     if workspace.exists() {
@@ -77,9 +88,99 @@ pub async fn ensure_workspace(
     }
 
     clone_into_workspace(source, source_branch, &workspace).await?;
+    write_workspace_metadata(&workspace, &expected_source, &expected_branch)?;
     configure_git_identity(&workspace).await?;
     ensure_branch_checked_out(&workspace, branch).await?;
     Ok(workspace)
+}
+
+fn normalize_source(source: &str) -> Result<String, String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("Task source is required".to_string());
+    }
+
+    if let Some(local_path) = resolve_local_source(trimmed) {
+        let canonical = std::fs::canonicalize(&local_path).map_err(|e| {
+            format!(
+                "Failed to resolve task source {}: {}",
+                local_path.display(),
+                e
+            )
+        })?;
+        return Ok(canonical.to_string_lossy().to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn parse_workspace_metadata(contents: &str) -> Option<(String, String)> {
+    let mut lines = contents.lines();
+    let source = lines.next()?.trim().to_string();
+    let branch = lines.next()?.trim().to_string();
+    if source.is_empty() || branch.is_empty() {
+        return None;
+    }
+    Some((source, branch))
+}
+
+fn read_workspace_metadata(workspace: &Path) -> Option<(String, String)> {
+    let contents = std::fs::read_to_string(workspace_metadata_path(workspace)).ok()?;
+    parse_workspace_metadata(&contents)
+}
+
+fn write_workspace_metadata(
+    workspace: &Path,
+    source: &str,
+    source_branch: &str,
+) -> Result<(), String> {
+    std::fs::write(
+        workspace_metadata_path(workspace),
+        format!("{source}\n{source_branch}\n"),
+    )
+    .map_err(|e| format!("Failed to write workspace metadata {:?}: {}", workspace, e))
+}
+
+async fn workspace_needs_reclone(
+    workspace: &Path,
+    expected_source: &str,
+    expected_branch: &str,
+) -> Result<bool, String> {
+    let (current_source, current_branch) = match read_workspace_metadata(workspace) {
+        Some(metadata) => metadata,
+        None => (
+            current_workspace_source(workspace).await?,
+            current_workspace_source_branch(workspace).await?,
+        ),
+    };
+
+    Ok(current_source != expected_source || current_branch != expected_branch)
+}
+
+async fn current_workspace_source(workspace: &Path) -> Result<String, String> {
+    let remote = run_git_capture(workspace, &["config", "--get", "remote.origin.url"]).await?;
+    normalize_source(remote.trim())
+}
+
+async fn current_workspace_source_branch(workspace: &Path) -> Result<String, String> {
+    let refs = run_git_capture(
+        workspace,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/remotes/origin",
+        ],
+    )
+    .await?;
+
+    let branch = refs
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "origin/HEAD")
+        .find_map(|line| line.strip_prefix("origin/"))
+        .ok_or_else(|| format!("Failed to determine source branch for workspace {:?}", workspace))?;
+
+    Ok(branch.to_string())
 }
 
 pub async fn finalize_workspace(
@@ -323,6 +424,110 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&repo_dir);
         let _ = std::fs::remove_dir_all(&prepared);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_workspace_reclones_when_source_changes() {
+        let repo_one = std::env::temp_dir().join(format!("coldstack-source-a-{}", Uuid::new_v4()));
+        let repo_two = std::env::temp_dir().join(format!("coldstack-source-b-{}", Uuid::new_v4()));
+        let task_id = format!("T-{}", Uuid::new_v4());
+        let workspace = workspace_path(&task_id);
+        let branch = "task/source-switch";
+
+        for (repo_dir, contents) in [(&repo_one, "first\n"), (&repo_two, "second\n")] {
+            std::fs::create_dir_all(repo_dir).unwrap();
+            run_git(Path::new("."), &["init", "--quiet", repo_dir.to_str().unwrap()])
+                .await
+                .unwrap();
+            run_git(repo_dir, &["config", "user.name", "Test User"])
+                .await
+                .unwrap();
+            run_git(repo_dir, &["config", "user.email", "test@example.com"])
+                .await
+                .unwrap();
+            std::fs::write(repo_dir.join("README.md"), contents).unwrap();
+            run_git(repo_dir, &["add", "README.md"]).await.unwrap();
+            run_git(repo_dir, &["commit", "-m", "init"]).await.unwrap();
+        }
+
+        ensure_workspace(&task_id, repo_one.to_str().unwrap(), "main", branch)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "first\n"
+        );
+
+        ensure_workspace(&task_id, repo_two.to_str().unwrap(), "main", branch)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "second\n"
+        );
+        assert_eq!(
+            current_workspace_source(&workspace).await.unwrap(),
+            std::fs::canonicalize(&repo_two)
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_one);
+        let _ = std::fs::remove_dir_all(&repo_two);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_workspace_reclones_when_source_branch_changes() {
+        let repo_dir = std::env::temp_dir().join(format!("coldstack-source-{}", Uuid::new_v4()));
+        let task_id = format!("T-{}", Uuid::new_v4());
+        let workspace = workspace_path(&task_id);
+        let branch = "task/branch-switch";
+
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        run_git(Path::new("."), &["init", "--quiet", repo_dir.to_str().unwrap()])
+            .await
+            .unwrap();
+        run_git(&repo_dir, &["config", "user.name", "Test User"])
+            .await
+            .unwrap();
+        run_git(&repo_dir, &["config", "user.email", "test@example.com"])
+            .await
+            .unwrap();
+        std::fs::write(repo_dir.join("README.md"), "main\n").unwrap();
+        run_git(&repo_dir, &["add", "README.md"]).await.unwrap();
+        run_git(&repo_dir, &["commit", "-m", "main"]).await.unwrap();
+        run_git(&repo_dir, &["checkout", "-b", "develop"]).await.unwrap();
+        std::fs::write(repo_dir.join("README.md"), "develop\n").unwrap();
+        run_git(&repo_dir, &["add", "README.md"]).await.unwrap();
+        run_git(&repo_dir, &["commit", "-m", "develop"]).await.unwrap();
+        run_git(&repo_dir, &["checkout", "main"]).await.unwrap();
+
+        ensure_workspace(&task_id, repo_dir.to_str().unwrap(), "main", branch)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "main\n"
+        );
+
+        ensure_workspace(&task_id, repo_dir.to_str().unwrap(), "develop", branch)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "develop\n"
+        );
+        assert_eq!(
+            current_workspace_source_branch(&workspace).await.unwrap(),
+            "develop"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_dir);
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]
