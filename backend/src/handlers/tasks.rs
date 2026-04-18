@@ -1,11 +1,39 @@
 use actix_web::{HttpResponse, web};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::db::AppState;
 use crate::errors::AppError;
 use crate::models::*;
 use crate::workflow;
+
+fn allocate_branch_name(
+    conn: &rusqlite::Connection,
+    title: &str,
+    description: &str,
+) -> Result<String, AppError> {
+    let base = crate::task_source::default_branch_name(title, description);
+    let mut candidate = base.clone();
+    let mut suffix = 2;
+
+    loop {
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM tasks WHERE branch_name = ?1 LIMIT 1",
+                params![candidate],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+
+        if !exists {
+            return Ok(candidate);
+        }
+
+        candidate = format!("{}-{}", base, suffix);
+        suffix += 1;
+    }
+}
 
 fn get_subtasks_for_task(
     conn: &rusqlite::Connection,
@@ -32,19 +60,33 @@ fn get_subtasks_for_task(
 }
 
 fn load_task(conn: &rusqlite::Connection, id: i64) -> Result<Task, AppError> {
-    let (task_id, title, description, archived, status_str, assignee, created_at) = conn
+    let (
+        task_id,
+        title,
+        description,
+        source,
+        source_branch,
+        branch_name,
+        archived,
+        status_str,
+        assignee,
+        created_at,
+    ) = conn
         .query_row(
-            "SELECT task_id, title, description, archived, status, assignee, created_at FROM tasks WHERE id = ?1",
+            "SELECT task_id, title, description, source, source_branch, branch_name, archived, status, assignee, created_at FROM tasks WHERE id = ?1",
             params![id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i32>(3)? == 1,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, i32>(6)? == 1,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             },
         )
@@ -58,6 +100,9 @@ fn load_task(conn: &rusqlite::Connection, id: i64) -> Result<Task, AppError> {
         task_id,
         title,
         description,
+        source,
+        source_branch,
+        branch_name,
         archived,
         status: WorkflowStatus::from_str(&status_str),
         assignee,
@@ -88,21 +133,33 @@ pub async fn get_tasks(data: web::Data<AppState>) -> HttpResponse {
                     ELSE 0
                 END AS needs_attention,
                 CASE WHEN t.status = 'NeedsHuman' THEN 1 ELSE 0 END AS waiting_for_human,
+                t.auto_handoff_pending,
                 (
                     SELECT COUNT(*) FROM task_workflow_events e
                     WHERE e.task_id = t.id AND e.action = 'reject'
                 ) AS rejection_count,
-                (
-                    SELECT CASE
-                        WHEN e.action = 'reject' THEN COALESCE(e.note, 'Returned for changes')
-                        WHEN e.action = 'archive' THEN 'Archived by human'
-                        ELSE 'Moved to ' || e.to_status
-                    END
-                    FROM task_workflow_events e
-                    WHERE e.task_id = t.id
-                    ORDER BY e.created_at DESC, e.id DESC
-                    LIMIT 1
-                ) AS latest_event_summary
+                CASE
+                    WHEN t.auto_handoff_pending = 1 THEN
+                        CASE t.status
+                            WHEN 'Plan' THEN 'Waiting for next idle planner agent'
+                            WHEN 'Design' THEN 'Waiting for next idle designer agent'
+                            WHEN 'Coding' THEN 'Waiting for next idle coder agent'
+                            WHEN 'Review' THEN 'Waiting for next idle reviewer agent'
+                            WHEN 'QA' THEN 'Waiting for next idle qa agent'
+                            ELSE 'Waiting for next agent'
+                        END
+                    ELSE (
+                        SELECT CASE
+                            WHEN e.action = 'reject' THEN COALESCE(e.note, 'Returned for changes')
+                            WHEN e.action = 'archive' THEN 'Archived by human'
+                            ELSE 'Moved to ' || e.to_status
+                        END
+                        FROM task_workflow_events e
+                        WHERE e.task_id = t.id
+                        ORDER BY e.created_at DESC, e.id DESC
+                        LIMIT 1
+                    )
+                END AS latest_event_summary
              FROM tasks t
              WHERE t.archived = 0
              ORDER BY t.created_at DESC",
@@ -121,8 +178,9 @@ pub async fn get_tasks(data: web::Data<AppState>) -> HttpResponse {
                     archived: row.get::<_, i32>(5)? == 1,
                     needs_attention: row.get::<_, i32>(6)? == 1,
                     waiting_for_human: row.get::<_, i32>(7)? == 1,
-                    rejection_count: row.get(8)?,
-                    latest_event_summary: row.get(9)?,
+                    waiting_for_agent: row.get::<_, i32>(8)? == 1,
+                    rejection_count: row.get(9)?,
+                    latest_event_summary: row.get(10)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -154,6 +212,24 @@ pub async fn create_task(data: web::Data<AppState>, item: web::Json<CreateTask>)
         let conn = data.db.get()?;
         let created_at_str = Utc::now().to_rfc3339();
         let default_status = WorkflowStatus::Plan;
+        let source = item.source.trim();
+        if source.is_empty() {
+            return Err(AppError::BadRequest(
+                "Task source is required".to_string(),
+            ));
+        }
+        let source_branch = item
+            .source_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_string())
+            .trim()
+            .to_string();
+        if source_branch.is_empty() {
+            return Err(AppError::BadRequest(
+                "Task source branch is required".to_string(),
+            ));
+        }
+        let branch_name = allocate_branch_name(&conn, &item.title, &item.description)?;
 
         let task_id = item
             .task_id
@@ -162,8 +238,8 @@ pub async fn create_task(data: web::Data<AppState>, item: web::Json<CreateTask>)
             .unwrap_or_else(|| format!("T-{}", uuid::Uuid::new_v4()));
 
         conn.execute(
-            "INSERT INTO tasks (task_id, title, description, archived, status, assignee, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
-            params![task_id, item.title, item.description, default_status.as_str(), item.assignee, created_at_str],
+            "INSERT INTO tasks (task_id, title, description, source, source_branch, branch_name, archived, status, assignee, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9)",
+            params![task_id, item.title, item.description, source, source_branch, branch_name, default_status.as_str(), item.assignee, created_at_str],
         )
         .map_err(|e| match e {
             rusqlite::Error::SqliteFailure(ref err, _) if err.extended_code == 2067 => {
@@ -178,6 +254,9 @@ pub async fn create_task(data: web::Data<AppState>, item: web::Json<CreateTask>)
             task_id,
             title: item.title.clone(),
             description: item.description.clone(),
+            source: Some(source.to_string()),
+            source_branch: Some(source_branch),
+            branch_name: Some(branch_name),
             archived: false,
             status: default_status,
             assignee: item.assignee.clone(),
@@ -206,11 +285,38 @@ pub async fn update_task(
         let new_task_id = item.task_id.clone().unwrap_or(existing.task_id);
         let new_title = item.title.clone().unwrap_or(existing.title);
         let new_desc = item.description.clone().unwrap_or(existing.description);
+        let new_source = match item.source.clone() {
+            Some(source) => {
+                let trimmed = source.trim();
+                if trimmed.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "Task source cannot be empty".to_string(),
+                    ));
+                }
+                Some(trimmed.to_string())
+            }
+            None => existing.source,
+        };
+        let new_source_branch = match item.source_branch.clone() {
+            Some(source_branch) => {
+                let trimmed = source_branch.trim();
+                if trimmed.is_empty() {
+                    return Err(AppError::BadRequest(
+                        "Task source branch cannot be empty".to_string(),
+                    ));
+                }
+                Some(trimmed.to_string())
+            }
+            None => existing.source_branch,
+        };
+        let branch_name = existing.branch_name.clone().or_else(|| {
+            allocate_branch_name(&conn, &new_title, &new_desc).ok()
+        });
         let new_assignee = item.assignee.clone().unwrap_or(existing.assignee);
 
         conn.execute(
-            "UPDATE tasks SET task_id = ?1, title = ?2, description = ?3, assignee = ?4 WHERE id = ?5",
-            params![new_task_id, new_title, new_desc, new_assignee, id],
+            "UPDATE tasks SET task_id = ?1, title = ?2, description = ?3, source = ?4, source_branch = ?5, branch_name = ?6, assignee = ?7 WHERE id = ?8",
+            params![new_task_id, new_title, new_desc, new_source, new_source_branch, branch_name, new_assignee, id],
         )
         .map_err(|e| match e {
             rusqlite::Error::SqliteFailure(ref err, _) if err.extended_code == 2067 => {
@@ -224,6 +330,41 @@ pub async fn update_task(
 
     match result {
         Ok(task) => HttpResponse::Ok().json(task),
+        Err(e) => e.to_response(),
+    }
+}
+
+pub async fn publish_task_branch(data: web::Data<AppState>, path: web::Path<i64>) -> HttpResponse {
+    let task_id = path.into_inner();
+
+    let result = (|| -> Result<(String, String), AppError> {
+        let conn = data.db.get()?;
+        let (task_key, branch_name): (String, Option<String>) = conn
+            .query_row(
+                "SELECT task_id, branch_name FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
+                other => AppError::Db(other),
+            })?;
+
+        let branch_name = branch_name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::Conflict("Task branch is missing".to_string()))?;
+
+        Ok((task_key, branch_name))
+    })();
+
+    match result {
+        Ok((task_key, branch_name)) => {
+            match crate::task_source::publish_workspace(&task_key, &branch_name).await {
+                Ok(()) => HttpResponse::Ok().json(PublishTaskBranchResponse { branch_name }),
+                Err(error) => AppError::Conflict(error).to_response(),
+            }
+        }
         Err(e) => e.to_response(),
     }
 }

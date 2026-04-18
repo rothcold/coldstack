@@ -153,6 +153,9 @@ pub struct Task {
     pub task_id: String,
     pub title: String,
     pub description: String,
+    pub source: Option<String>,
+    pub source_branch: Option<String>,
+    pub branch_name: Option<String>,
     pub archived: bool,
     pub status: WorkflowStatus,
     pub assignee: Option<String>,
@@ -171,6 +174,7 @@ pub struct BoardTaskSummary {
     pub archived: bool,
     pub needs_attention: bool,
     pub waiting_for_human: bool,
+    pub waiting_for_agent: bool,
     pub rejection_count: i64,
     pub latest_event_summary: Option<String>,
 }
@@ -196,6 +200,7 @@ pub struct TaskDetail {
     pub events: Vec<WorkflowEvent>,
     pub current_action_label: String,
     pub current_action_hint: Option<String>,
+    pub waiting_for_agent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +209,8 @@ pub struct CreateTask {
     pub task_id: Option<String>,
     pub title: String,
     pub description: String,
+    pub source: String,
+    pub source_branch: Option<String>,
     pub assignee: Option<String>,
 }
 
@@ -224,8 +231,15 @@ pub struct UpdateTask {
     pub task_id: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub source: Option<String>,
+    pub source_branch: Option<String>,
     #[serde(default, with = "double_option")]
     pub assignee: Option<Option<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublishTaskBranchResponse {
+    pub branch_name: String,
 }
 
 #[derive(Debug, Deserialize)]

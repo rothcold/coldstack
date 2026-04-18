@@ -60,9 +60,14 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             task_id TEXT NOT NULL UNIQUE,
             title TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
+            source TEXT,
+            source_branch TEXT NOT NULL DEFAULT 'main',
+            branch_name TEXT,
             archived INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'Plan',
             assignee TEXT,
+            auto_handoff_pending INTEGER NOT NULL DEFAULT 0,
+            auto_handoff_claimed_at TEXT,
             created_at TEXT NOT NULL
         )",
         [],
@@ -93,6 +98,18 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    if !columns.contains(&"source".to_string()) {
+        conn.execute("ALTER TABLE tasks ADD COLUMN source TEXT", [])?;
+    }
+    if !columns.contains(&"source_branch".to_string()) {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN source_branch TEXT NOT NULL DEFAULT 'main'",
+            [],
+        )?;
+    }
+    if !columns.contains(&"branch_name".to_string()) {
+        conn.execute("ALTER TABLE tasks ADD COLUMN branch_name TEXT", [])?;
+    }
     if !columns.contains(&"archived".to_string()) {
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
@@ -101,6 +118,15 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !columns.contains(&"assignee".to_string()) {
         conn.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT", [])?;
+    }
+    if !columns.contains(&"auto_handoff_pending".to_string()) {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN auto_handoff_pending INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains(&"auto_handoff_claimed_at".to_string()) {
+        conn.execute("ALTER TABLE tasks ADD COLUMN auto_handoff_claimed_at TEXT", [])?;
     }
     if columns.contains(&"completed".to_string()) {
         conn.execute(

@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::BufReader;
 use tokio::process::Command;
@@ -7,18 +6,6 @@ use tokio::process::Command;
 use super::{AgentAdapter, AgentProcess, EmployeeConfig, TaskInfo};
 
 pub struct ClaudeCodeAdapter;
-
-fn sanitize_path(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
 
 impl ClaudeCodeAdapter {
     fn find_claude_binary() -> Option<String> {
@@ -50,20 +37,24 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         let prompt = if let Some(ref sys_prompt) = employee.system_prompt {
             format!(
-                "{}\n\nTask: {} ({})\n\n{}",
-                sys_prompt, task.title, task.task_id, task.description
+                "{}\n\nRepository source: {}\nSource branch: {}\nTarget branch: {}\n\nTask: {} ({})\n\n{}",
+                sys_prompt, task.source, task.source_branch, task.branch_name, task.title, task.task_id, task.description
             )
         } else {
             format!(
-                "Task: {} ({})\n\n{}",
-                task.title, task.task_id, task.description
+                "Repository source: {}\nSource branch: {}\nTarget branch: {}\n\nTask: {} ({})\n\n{}",
+                task.source, task.source_branch, task.branch_name, task.title, task.task_id, task.description
             )
         };
 
-        let workspace: PathBuf =
-            PathBuf::from("agent_workspaces").join(sanitize_path(&task.task_id));
-        std::fs::create_dir_all(&workspace)
-            .map_err(|e| format!("Failed to create workspace {:?}: {}", workspace, e))?;
+        let workspace =
+            crate::task_source::ensure_workspace(
+                &task.task_id,
+                &task.source,
+                &task.source_branch,
+                &task.branch_name,
+            )
+                .await?;
 
         let mut cmd = Command::new(&binary);
         cmd.current_dir(&workspace)

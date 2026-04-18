@@ -3,6 +3,8 @@ mod db;
 mod errors;
 mod handlers;
 mod models;
+mod orchestration;
+mod task_source;
 mod workflow;
 
 use actix_cors::Cors;
@@ -51,6 +53,10 @@ fn configure_api_routes(cfg: &mut web::ServiceConfig) {
             .route(
                 "/tasks/{id}",
                 web::delete().to(handlers::tasks::delete_task),
+            )
+            .route(
+                "/tasks/{id}/publish",
+                web::post().to(handlers::tasks::publish_task_branch),
             )
             .route(
                 "/tasks/{id}/transition",
@@ -170,6 +176,7 @@ mod tests {
             .collect();
         assert!(task_cols.contains(&"archived".to_string()));
         assert!(task_cols.contains(&"status".to_string()));
+        assert!(task_cols.contains(&"source_branch".to_string()));
 
         let mut stmt = conn.prepare("PRAGMA table_info(ai_employees)").unwrap();
         let employee_cols: Vec<String> = stmt
@@ -179,6 +186,8 @@ mod tests {
             .collect();
         assert!(employee_cols.contains(&"workflow_role".to_string()));
         assert!(employee_cols.contains(&"custom_prompt".to_string()));
+        assert!(task_cols.contains(&"auto_handoff_pending".to_string()));
+        assert!(task_cols.contains(&"auto_handoff_claimed_at".to_string()));
     }
 
     #[::core::prelude::v1::test]
@@ -339,6 +348,7 @@ mod tests {
                 "task_id": "T-001",
                 "title": "Build feature",
                 "description": "Implement login",
+                "source": "/tmp/project",
                 "assignee": "alice"
             }))
             .to_request();
@@ -348,6 +358,27 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["archived"], false);
         assert_eq!(body["status"], "Plan");
+        assert_eq!(body["source"], "/tmp/project");
+        assert_eq!(body["source_branch"], "main");
+        assert_eq!(body["branch_name"], "task/build-feature");
+    }
+
+    #[actix_web::test]
+    async fn test_create_task_requires_source() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-NOSOURCE",
+                "title": "Build feature",
+                "description": "Implement login",
+                "source": ""
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
     }
 
     #[actix_web::test]
@@ -360,7 +391,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-SUM",
                 "title": "Board item",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let create_resp = test::call_service(&app, create_req).await;
@@ -387,7 +419,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-DETAIL",
                 "title": "Detail item",
-                "description": "Trace me"
+                "description": "Trace me",
+                "source": "/tmp/project"
             }))
             .to_request();
         let create_resp = test::call_service(&app, create_req).await;
@@ -402,8 +435,68 @@ mod tests {
 
         let body: serde_json::Value = test::read_body_json(detail_resp).await;
         assert_eq!(body["task"]["task_id"], "T-DETAIL");
+        assert_eq!(body["task"]["source"], "/tmp/project");
+        assert_eq!(body["task"]["source_branch"], "main");
+        assert_eq!(body["task"]["branch_name"], "task/detail-item");
         assert!(body["events"].as_array().unwrap().is_empty());
         assert!(body["current_action_label"].is_string());
+    }
+
+    #[actix_web::test]
+    async fn test_create_task_allocates_unique_human_readable_branch_name() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let first_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-BRANCH-1",
+                "title": "Build weather forecast website",
+                "description": "",
+                "source": "/tmp/project"
+            }))
+            .to_request();
+        let first_resp = test::call_service(&app, first_req).await;
+        assert_eq!(first_resp.status(), 201);
+        let first: serde_json::Value = test::read_body_json(first_resp).await;
+
+        let second_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-BRANCH-2",
+                "title": "Build weather forecast website",
+                "description": "",
+                "source": "/tmp/project"
+            }))
+            .to_request();
+        let second_resp = test::call_service(&app, second_req).await;
+        assert_eq!(second_resp.status(), 201);
+        let second: serde_json::Value = test::read_body_json(second_resp).await;
+
+        assert_eq!(first["branch_name"], "task/build-weather-forecast-website");
+        assert_eq!(second["branch_name"], "task/build-weather-forecast-website-2");
+    }
+
+    #[actix_web::test]
+    async fn test_create_task_accepts_custom_source_branch() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-SRC-BRANCH",
+                "title": "Build feature",
+                "description": "Implement login",
+                "source": "/tmp/project",
+                "source_branch": "develop"
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 201);
+
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["source_branch"], "develop");
     }
 
     #[actix_web::test]
@@ -430,7 +523,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-MOVE",
                 "title": "Move it",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -465,7 +559,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-ARCH",
                 "title": "Archive me",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let create_resp = test::call_service(&app, create_req).await;
@@ -675,7 +770,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-CURRENT",
                 "title": "Current execution",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -703,6 +799,67 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn test_assign_task_rejects_missing_source() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state.clone());
+
+        let employee_req = test::TestRequest::post()
+            .uri("/api/employees")
+            .set_json(serde_json::json!({
+                "name": "Coder",
+                "role": "Coder",
+                "workflow_role": "coder",
+                "department": "Engineering",
+                "agent_backend": "claude_code"
+            }))
+            .to_request();
+        let employee_resp = test::call_service(&app, employee_req).await;
+        let employee: serde_json::Value = test::read_body_json(employee_resp).await;
+        let employee_id = employee["id"].as_i64().unwrap();
+
+        let task_id = {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO tasks (task_id, title, description, archived, status, created_at) VALUES ('T-LEGACY', 'Legacy task', '', 0, 'Coding', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/employees/{}/assign/{}", employee_id, task_id))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn test_assign_task_returns_not_found_for_missing_employee() {
+        let state = make_state(setup_pool());
+        let app = test_app!(state);
+
+        let task_req = test::TestRequest::post()
+            .uri("/api/tasks")
+            .set_json(serde_json::json!({
+                "task_id": "T-MISSING-EMPLOYEE",
+                "title": "Assign target",
+                "description": "",
+                "source": "/tmp/project"
+            }))
+            .to_request();
+        let task_resp = test::call_service(&app, task_req).await;
+        let task: serde_json::Value = test::read_body_json(task_resp).await;
+        let task_id = task["id"].as_i64().unwrap();
+
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/employees/999999/assign/{}", task_id))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[actix_web::test]
     async fn test_cancel_execution_returns_employee_to_idle() {
         let state = make_state(setup_pool());
         let app = test_app!(state.clone());
@@ -726,7 +883,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-STOP",
                 "title": "Stop execution",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -802,7 +960,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-STOP-CONFLICT",
                 "title": "Conflict execution",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -862,7 +1021,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-RESET-ERROR",
                 "title": "Reset error",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -984,7 +1144,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-RESET-BUSY",
                 "title": "Busy reset",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -1073,7 +1234,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-REJECT",
                 "title": "Reject me",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -1118,7 +1280,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-DONE",
                 "title": "Archive done task",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -1160,6 +1323,7 @@ mod tests {
                 "task_id": "T-UPD",
                 "title": "Editable task",
                 "description": "before",
+                "source": "/tmp/project",
                 "assignee": "Alice"
             }))
             .to_request();
@@ -1204,7 +1368,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-NOARCHIVE",
                 "title": "Keep visible",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let create_resp = test::call_service(&app, create_req).await;
@@ -1260,7 +1425,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-ATTN",
                 "title": "Attention lifecycle",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -1337,7 +1503,8 @@ mod tests {
             .set_json(serde_json::json!({
                 "task_id": "T-QA-REJECT",
                 "title": "QA reject",
-                "description": ""
+                "description": "",
+                "source": "/tmp/project"
             }))
             .to_request();
         let task_resp = test::call_service(&app, task_req).await;
@@ -1368,6 +1535,281 @@ mod tests {
         assert_eq!(body["task"]["task"]["status"], "Coding");
         assert_eq!(body["task"]["events"][0]["note"], "Regression still open");
     }
+
+    #[actix_web::test]
+    async fn test_execution_success_auto_handoffs_to_smallest_idle_downstream() {
+        let state = make_state(setup_pool());
+        if !state.adapters.is_available("claude_code") {
+            return;
+        }
+
+        let (task_id, _planner_id, designer_small_id, designer_large_id, execution_id) = {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO tasks (task_id, title, description, source, branch_name, status, created_at) VALUES ('T-HANDOFF', 'Auto handoff', '', '/tmp/project', 'task/auto-handoff', 'Plan', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let task_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, status, created_at)
+                 VALUES ('Planner', 'Planner', 'planner', 'Ops', 'claude_code', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let planner_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, status, created_at)
+                 VALUES ('Designer A', 'Designer', 'designer', 'Design', 'claude_code', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let designer_small_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, status, created_at)
+                 VALUES ('Designer B', 'Designer', 'designer', 'Design', 'claude_code', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let designer_large_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO task_executions (task_id, employee_id, started_at, finished_at, exit_code, status)
+                 VALUES (?1, ?2, datetime('now'), datetime('now'), 0, 'completed')",
+                rusqlite::params![task_id, planner_id],
+            )
+            .unwrap();
+            let execution_id = conn.last_insert_rowid();
+            (
+                task_id,
+                planner_id,
+                designer_small_id,
+                designer_large_id,
+                execution_id,
+            )
+        };
+
+        orchestration::process_execution_success(state.clone(), execution_id, false)
+            .await
+            .unwrap();
+
+        let conn = state.db.get().unwrap();
+        let (status, pending, running_employee): (String, i32, i64) = (
+            conn.query_row("SELECT status FROM tasks WHERE id = ?1", [task_id], |row| row.get(0))
+                .unwrap(),
+            conn.query_row(
+                "SELECT auto_handoff_pending FROM tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT employee_id FROM task_executions WHERE task_id = ?1 AND id != ?2 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![task_id, execution_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        );
+        let designer_small_status: String = conn
+            .query_row(
+                "SELECT status FROM ai_employees WHERE id = ?1",
+                [designer_small_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let designer_large_status: String = conn
+            .query_row(
+                "SELECT status FROM ai_employees WHERE id = ?1",
+                [designer_large_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(status, "Design");
+        assert_eq!(pending, 0);
+        assert_eq!(running_employee, designer_small_id);
+        assert_eq!(designer_small_status, "working");
+        assert_eq!(designer_large_status, "idle");
+    }
+
+    #[actix_web::test]
+    async fn test_execution_success_marks_pending_when_no_downstream_idle_agent() {
+        let state = make_state(setup_pool());
+        if !state.adapters.is_available("claude_code") {
+            return;
+        }
+
+        let (task_id, execution_id) = {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO tasks (task_id, title, description, source, branch_name, status, created_at) VALUES ('T-PENDING', 'Pending handoff', '', '/tmp/project', 'task/pending-handoff', 'Plan', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let task_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, status, created_at)
+                 VALUES ('Planner', 'Planner', 'planner', 'Ops', 'claude_code', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let planner_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, status, created_at)
+                 VALUES ('Designer', 'Designer', 'designer', 'Design', 'claude_code', 'working', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_executions (task_id, employee_id, started_at, finished_at, exit_code, status)
+                 VALUES (?1, ?2, datetime('now'), datetime('now'), 0, 'completed')",
+                rusqlite::params![task_id, planner_id],
+            )
+            .unwrap();
+            (task_id, conn.last_insert_rowid())
+        };
+
+        orchestration::process_execution_success(state.clone(), execution_id, false)
+            .await
+            .unwrap();
+
+        let conn = state.db.get().unwrap();
+        let (status, pending, claimed_at, execution_count): (String, i32, Option<String>, i64) = (
+            conn.query_row("SELECT status FROM tasks WHERE id = ?1", [task_id], |row| row.get(0))
+                .unwrap(),
+            conn.query_row(
+                "SELECT auto_handoff_pending FROM tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT auto_handoff_claimed_at FROM tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM task_executions WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(status, "Design");
+        assert_eq!(pending, 1);
+        assert!(claimed_at.is_none());
+        assert_eq!(execution_count, 1);
+    }
+
+    #[actix_web::test]
+    async fn test_scanner_picks_up_pending_task_after_agent_becomes_idle() {
+        let state = make_state(setup_pool());
+        if !state.adapters.is_available("claude_code") {
+            return;
+        }
+
+        let (task_id, reviewer_id) = {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO tasks (task_id, title, description, source, branch_name, status, auto_handoff_pending, created_at)
+                 VALUES ('T-SCAN', 'Scanner pickup', '', '/tmp/project', 'task/scanner-pickup', 'Review', 1, datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let task_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, status, created_at)
+                 VALUES ('Reviewer', 'Reviewer', 'reviewer', 'QA', 'claude_code', 'working', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let reviewer_id = conn.last_insert_rowid();
+            (task_id, reviewer_id)
+        };
+
+        {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "UPDATE ai_employees SET status = 'idle' WHERE id = ?1",
+                [reviewer_id],
+            )
+            .unwrap();
+        }
+
+        orchestration::process_pending_auto_handoffs(state.clone(), false)
+            .await
+            .unwrap();
+
+        let conn = state.db.get().unwrap();
+        let (pending, execution_count, employee_status): (i32, i64, String) = (
+            conn.query_row(
+                "SELECT auto_handoff_pending FROM tasks WHERE id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM task_executions WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT status FROM ai_employees WHERE id = ?1",
+                [reviewer_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(pending, 0);
+        assert_eq!(execution_count, 1);
+        assert_eq!(employee_status, "working");
+    }
+
+    #[actix_web::test]
+    async fn test_auto_handoff_claim_prevents_duplicate_assignment() {
+        let state = make_state(setup_pool());
+        if !state.adapters.is_available("claude_code") {
+            return;
+        }
+
+        let task_id = {
+            let conn = state.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO tasks (task_id, title, description, source, branch_name, status, auto_handoff_pending, created_at)
+                 VALUES ('T-CLAIM', 'Claim once', '', '/tmp/project', 'task/claim-once', 'Review', 1, datetime('now'))",
+                [],
+            )
+            .unwrap();
+            let task_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO ai_employees (name, role, workflow_role, department, agent_backend, status, created_at)
+                 VALUES ('Reviewer', 'Reviewer', 'reviewer', 'QA', 'claude_code', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            task_id
+        };
+
+        let (first, second) = tokio::join!(
+            orchestration::attempt_auto_handoff(state.clone(), task_id, false),
+            orchestration::attempt_auto_handoff(state.clone(), task_id, false)
+        );
+
+        let conn = state.db.get().unwrap();
+        let execution_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_executions WHERE task_id = ?1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(execution_count, 1);
+        assert_eq!(u8::from(first.unwrap()) + u8::from(second.unwrap()), 1);
+    }
 }
 
 #[actix_web::main]
@@ -1382,6 +1824,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     let state = web::Data::new(db::AppState::new(pool));
+    orchestration::start_auto_handoff_scanner(state.clone());
 
     HttpServer::new(move || {
         let cors = Cors::default()

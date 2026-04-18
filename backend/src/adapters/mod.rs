@@ -9,6 +9,9 @@ pub struct TaskInfo {
     pub title: String,
     pub description: String,
     pub task_id: String,
+    pub source: String,
+    pub source_branch: String,
+    pub branch_name: String,
 }
 
 pub struct EmployeeConfig {

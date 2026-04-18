@@ -1,6 +1,6 @@
 use actix_web::{HttpResponse, web};
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use crate::adapters::{EmployeeConfig, TaskInfo};
 use crate::db::AppState;
@@ -30,6 +30,13 @@ pub(crate) fn build_employee_config(
             custom_prompt.as_deref(),
         )),
     }
+}
+
+pub(crate) struct AssignmentLaunch {
+    pub execution: Execution,
+    pub task_info: TaskInfo,
+    pub employee_config: EmployeeConfig,
+    pub backend: String,
 }
 
 fn transition_employee_to_idle(
@@ -320,107 +327,148 @@ pub async fn delete_employee(data: web::Data<AppState>, path: web::Path<i64>) ->
 pub async fn assign_task(data: web::Data<AppState>, path: web::Path<(i64, i64)>) -> HttpResponse {
     let (employee_id, task_id) = path.into_inner();
 
-    let result = (|| -> Result<(Execution, TaskInfo, EmployeeConfig, String), AppError> {
+    let result = (|| -> Result<AssignmentLaunch, AppError> {
         let mut conn = data.db.get()?;
-        let tx = conn.transaction()?;
-
-        // Get task info
-        let (title, description, task_id_str): (String, String, String) = tx
-            .query_row(
-                "SELECT title, description, task_id FROM tasks WHERE id = ?1",
-                params![task_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
-                other => AppError::Db(other),
-            })?;
-
-        // Atomic update: only succeed if employee is idle
-        let affected = tx.execute(
-            "UPDATE ai_employees SET status = 'working' WHERE id = ?1 AND status = 'idle'",
-            params![employee_id],
-        )?;
-
-        if affected == 0 {
-            // Check if employee exists to distinguish between 404 and 409
-            let exists: bool = tx
-                .query_row(
-                    "SELECT 1 FROM ai_employees WHERE id = ?1",
-                    params![employee_id],
-                    |_| Ok(true),
-                )
-                .unwrap_or(false);
-
-            if !exists {
-                return Err(AppError::NotFound);
-            }
-            return Err(AppError::Conflict("Employee is not idle".to_string()));
-        }
-
-        // Get employee info for execution setup
-        let (backend, workflow_role, custom_prompt): (String, String, Option<String>) = tx
-            .query_row(
-                "SELECT agent_backend, workflow_role, custom_prompt FROM ai_employees WHERE id = ?1",
-                params![employee_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-        validate_agent_backend(&backend)?;
-        if !data.adapters.is_available(&backend) {
-            return Err(AppError::Conflict(format!(
-                "Adapter backend '{}' is not available on this server",
-                backend
-            )));
-        }
-
-        let started_at = Utc::now().to_rfc3339();
-
-        // Create execution
-        tx.execute(
-            "INSERT INTO task_executions (task_id, employee_id, started_at, status) VALUES (?1, ?2, ?3, 'running')",
-            params![task_id, employee_id, started_at],
-        )?;
-        let execution_id = tx.last_insert_rowid();
-
-        tx.commit()?;
-
-        let execution = Execution {
-            id: execution_id,
-            task_id,
-            employee_id,
-            started_at,
-            finished_at: None,
-            exit_code: None,
-            status: ExecutionStatus::Running,
-        };
-
-        let task_info = TaskInfo {
-            title,
-            description,
-            task_id: task_id_str,
-        };
-
-        let employee_config =
-            build_employee_config(WorkflowRole::from_str(&workflow_role), custom_prompt);
-
-        Ok((execution, task_info, employee_config, backend))
+        prepare_assignment(&data, &mut conn, employee_id, task_id)
     })();
 
     match result {
-        Ok((execution, task_info, employee_config, backend)) => {
-            // Spawn agent process in background
-            let execution_id = execution.id;
-            tokio::spawn(super::executions::spawn_execution(
-                data,
-                execution_id,
-                task_info,
-                employee_config,
-                backend,
-            ));
+        Ok(launch) => {
+            let execution = launch.execution.clone();
+            launch_assignment(data, launch);
             HttpResponse::Created().json(execution)
         }
         Err(e) => e.to_response(),
     }
+}
+
+pub(crate) fn prepare_assignment(
+    data: &web::Data<AppState>,
+    conn: &mut rusqlite::Connection,
+    employee_id: i64,
+    task_id: i64,
+) -> Result<AssignmentLaunch, AppError> {
+    let tx = conn.transaction()?;
+
+    let (title, description, task_id_str, source, source_branch, branch_name): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = tx
+        .query_row(
+            "SELECT title, description, task_id, source, source_branch, branch_name FROM tasks WHERE id = ?1",
+            params![task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
+            other => AppError::Db(other),
+        })?;
+    let source = source
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Task source is required before assignment".to_string()))?;
+    let source_branch = source_branch
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Task source branch is required before assignment".to_string()))?;
+    let branch_name = branch_name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Task branch is required before assignment".to_string()))?;
+
+    let (backend, workflow_role, custom_prompt): (String, String, Option<String>) = tx.query_row(
+        "SELECT agent_backend, workflow_role, custom_prompt FROM ai_employees WHERE id = ?1",
+        params![employee_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => AppError::NotFound,
+        other => AppError::Db(other),
+    })?;
+    validate_agent_backend(&backend)?;
+    if !data.adapters.is_available(&backend) {
+        return Err(AppError::Conflict(format!(
+            "Adapter backend '{}' is not available on this server",
+            backend
+        )));
+    }
+
+    let affected = tx.execute(
+        "UPDATE ai_employees SET status = 'working' WHERE id = ?1 AND status = 'idle'",
+        params![employee_id],
+    )?;
+
+    if affected == 0 {
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM ai_employees WHERE id = ?1",
+                params![employee_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !exists {
+            return Err(AppError::NotFound);
+        }
+        return Err(AppError::Conflict("Employee is not idle".to_string()));
+    }
+
+    let started_at = Utc::now().to_rfc3339();
+
+    tx.execute(
+        "INSERT INTO task_executions (task_id, employee_id, started_at, status) VALUES (?1, ?2, ?3, 'running')",
+        params![task_id, employee_id, started_at],
+    )?;
+    let execution_id = tx.last_insert_rowid();
+
+    tx.execute(
+        "UPDATE tasks SET auto_handoff_pending = 0, auto_handoff_claimed_at = NULL WHERE id = ?1",
+        params![task_id],
+    )?;
+
+    tx.commit()?;
+
+    let execution = Execution {
+        id: execution_id,
+        task_id,
+        employee_id,
+        started_at,
+        finished_at: None,
+        exit_code: None,
+        status: ExecutionStatus::Running,
+    };
+
+    let task_info = TaskInfo {
+        title,
+        description,
+        task_id: task_id_str,
+        source,
+        source_branch,
+        branch_name,
+    };
+
+    let employee_config = build_employee_config(WorkflowRole::from_str(&workflow_role), custom_prompt);
+
+    Ok(AssignmentLaunch {
+        execution,
+        task_info,
+        employee_config,
+        backend,
+    })
+}
+
+pub(crate) fn launch_assignment(state: web::Data<AppState>, launch: AssignmentLaunch) {
+    tokio::spawn(super::executions::spawn_execution(
+        state,
+        launch.execution.id,
+        launch.task_info,
+        launch.employee_config,
+        launch.backend,
+    ));
 }
 
 pub async fn get_current_execution(
