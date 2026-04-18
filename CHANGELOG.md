@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0.0] - 2026-04-18
+
+### Added
+- Added task source repository support, including editable source branch selection, human-readable task branch names, and workspace cloning from either local git paths or remote repositories.
+- Added an explicit `Push Branch` task action so finished task work can be pushed to the source repository on demand instead of implicitly during execution finalization.
+- Added automatic workflow handoff orchestration that advances successful tasks to the next stage, assigns the next idle matching agent, and falls back to a pending queue when no downstream agent is available.
+- Added an in-process background scanner that retries pending auto-handoffs when a matching idle agent later becomes available.
+
+### Changed
+- Changed agent execution startup so adapters always receive repository source, source branch, and target branch context before work begins.
+- Changed task detail and board UI to show waiting-for-agent state, source metadata, and branch metadata directly in the workflow surface.
+- Changed local task workspace cloning to use isolated git object storage for local repositories, reducing bleed-through from task workspaces back into source repos.
+
+### Fixed
+- Fixed assignment error handling so assigning a task to a missing employee still returns `404` after the assignment flow refactor.
+- Fixed backend and frontend test coverage around task source branch handling, publish branch behavior, and automatic workflow handoff visibility.
+
 ## [0.1.0.0] - 2026-04-13
 
 ### Added
