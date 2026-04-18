@@ -12,6 +12,7 @@ describe('TaskDetailTimeline', () => {
             task_id: 'T-200',
             title: 'Fresh task',
             description: '',
+            source: '/tmp/project',
             archived: false,
             status: 'Plan',
             assignee: null,
@@ -21,6 +22,7 @@ describe('TaskDetailTimeline', () => {
           events: [],
           current_action_label: 'Ready for planning',
           current_action_hint: 'Assign a planner to move the task forward.',
+          waiting_for_agent: false,
         }}
       />,
     )
@@ -39,6 +41,7 @@ describe('TaskDetailTimeline', () => {
             task_id: 'T-201',
             title: 'Returned task',
             description: '',
+            source: '/tmp/project',
             archived: false,
             status: 'Coding',
             assignee: 'Alice',
@@ -62,6 +65,7 @@ describe('TaskDetailTimeline', () => {
           ],
           current_action_label: 'Returned to coding',
           current_action_hint: null,
+          waiting_for_agent: false,
         }}
       />,
     )

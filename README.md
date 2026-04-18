@@ -1,13 +1,13 @@
 # Coldstack
 
-A self-hosted, single-binary AI employee dashboard. Coldstack lets you register AI agents (Claude, Gemini, …), assign them tasks, and watch them work — all from one Rust binary that embeds the entire web UI.
+A self-hosted, single-binary AI workflow control plane. Coldstack lets you register role-specific AI agents, assign them staged tasks, and watch handoffs move from planning to QA from one Rust binary that embeds the web UI.
 
 ## What's in the box
 
 - **`backend/`** — Rust + Actix-web server (`coldstack-server` crate, binary name `coldstack`). SQLite via `rusqlite` (bundled), serves the embedded React SPA on the same port as the API.
 - **`frontend/`** — React 19 + TypeScript + Vite (`coldstack-web` package). Compiled to static assets that get embedded into the Rust binary at build time via `rust-embed`.
 - **`mcp/`** — MCP server exposing Coldstack's task/agent API as MCP tools, so any MCP-aware AI client can manage tasks directly.
-- **`agent/`** — Node.js polling runner that picks up `Pending` tasks, dispatches them to the configured CLI (`claude` / `gemini`), and reports back via the API.
+- **`agent_workspaces/`** — Per-task git workspaces created from each task's configured source repository and source branch.
 - **`COLDSTACK_SKILL.md`** — API reference for AI agents integrating against Coldstack.
 
 ## Quick start
@@ -48,20 +48,13 @@ pnpm run dev                     # http://localhost:5173
 
 ## Running agents
 
-Start the polling runner alongside the server:
+Register employees through the UI or API, then assign them workflow tasks. Each task now carries:
 
-```bash
-cd agent
-node index.js
-```
+- a git source, local path or remote repository
+- a source branch, defaulting to `main`
+- a dedicated human-readable task branch
 
-Environment variables:
-
-- `COLDSTACK_URL` — server URL (default `http://127.0.0.1:8080`)
-- `POLL_INTERVAL_MS` — poll interval in ms (default `5000`)
-- `MCP_SERVER_PATH` — path to the MCP server (default `../mcp/index.js`)
-
-The runner picks up any task whose `assignee` matches a registered agent's `name` and whose `status` is `Pending`. Failures retry up to 3× before flipping the task to `Reviewing`.
+When an agent starts work, Coldstack clones the source into `agent_workspaces/<task-id>/`, checks out the task branch, and commits task output locally. The task detail panel exposes an explicit `Push Branch` action when you want to publish that branch back to the source repository.
 
 ## MCP integration
 
@@ -71,16 +64,19 @@ Point any MCP client at `mcp/index.js` to expose Coldstack's tools (`list_tasks`
 
 All routes are under `/api`. See [`COLDSTACK_SKILL.md`](./COLDSTACK_SKILL.md) for the full reference. Highlights:
 
-- `GET /api/tasks` — list tasks (with subtasks)
+- `GET /api/tasks` — list workflow board summaries
 - `POST /api/tasks` — create task (`task_id` must be unique → `409 Conflict` otherwise)
 - `PUT /api/tasks/{id}` — partial update
+- `POST /api/tasks/{id}/publish` — push the task branch to the configured source repository
 - `DELETE /api/tasks/{id}` — cascades to subtasks
 - `GET /api/agents`, `POST /api/agents`, `PUT /api/agents/{id}`, `DELETE /api/agents/{id}`
 - `GET /api/employees`, `POST /api/employees/{id}/assign/{task_id}`, …
 
 `{id}` always refers to the **internal integer `id`**, not the user-facing `task_id` string.
 
-**Task statuses:** `Pending` → `Doing` → `Finished` → `Reviewing` → `Done`
+**Task statuses:** `Plan` → `Design` → `Coding` → `Review` → `QA` → `NeedsHuman` → `Done`
+
+Successful executions can automatically hand tasks to the next matching idle workflow-role agent. If no downstream agent is idle, the task stays in the next status and is marked as waiting for auto handoff until the background scanner can claim it.
 
 ## Project layout
 

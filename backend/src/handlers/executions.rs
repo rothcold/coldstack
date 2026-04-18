@@ -155,7 +155,24 @@ pub async fn spawn_execution(
         if !cancelled {
             // Process finished naturally
             let exit_status = child.wait().await;
-            let exit_code = exit_status.ok().and_then(|s| s.code()).unwrap_or(-1);
+            let mut exit_code = exit_status.ok().and_then(|s| s.code()).unwrap_or(-1);
+            let mut git_finalize_error = None;
+
+            if exit_code == 0 {
+                match crate::task_source::finalize_workspace(
+                    &task_info.task_id,
+                    &task_info.branch_name,
+                    &task_info.title,
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(error) => {
+                        exit_code = -1;
+                        git_finalize_error = Some(error);
+                    }
+                }
+            }
 
             let finished_at = Utc::now().to_rfc3339();
             let status = if exit_code == 0 {
@@ -179,6 +196,27 @@ pub async fn spawn_execution(
                     let _ = conn.execute(
                         "UPDATE ai_employees SET status = ?1 WHERE id = ?2",
                         params![emp_status, employee_id],
+                    );
+                }
+            }
+
+            if exit_code == 0 {
+                let _ = crate::orchestration::process_execution_success(
+                    state_clone.clone(),
+                    execution_id,
+                    true,
+                )
+                .await;
+            } else if let Some(error) = git_finalize_error {
+                if let Ok(conn) = state_clone.db.get() {
+                    let _ = conn.execute(
+                        "INSERT INTO output_chunks (execution_id, seq, chunk, created_at) VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            execution_id,
+                            seq.fetch_add(1, Ordering::Relaxed) + 1,
+                            format!("Git finalize failed: {}", error),
+                            Utc::now().to_rfc3339()
+                        ],
                     );
                 }
             }

@@ -16,6 +16,7 @@ describe('WorkflowTaskCard', () => {
           archived: false,
           needs_attention: false,
           waiting_for_human: true,
+          waiting_for_agent: false,
           rejection_count: 0,
           latest_event_summary: 'Needs your decision',
         }}
@@ -42,6 +43,7 @@ describe('WorkflowTaskCard', () => {
           archived: false,
           needs_attention: true,
           waiting_for_human: false,
+          waiting_for_agent: false,
           rejection_count: 1,
           latest_event_summary: 'Returned by QA with notes',
         }}
@@ -52,5 +54,31 @@ describe('WorkflowTaskCard', () => {
 
     expect(screen.getByText('Returned')).toBeInTheDocument()
     expect(screen.getByText('Returned by QA with notes')).toBeInTheDocument()
+  })
+
+  it('renders waiting for next agent state', () => {
+    render(
+      <WorkflowTaskCard
+        task={{
+          id: 3,
+          task_id: 'T-102',
+          title: 'Waiting task',
+          status: 'Review',
+          board_group: 'Review',
+          assignee: null,
+          archived: false,
+          needs_attention: false,
+          waiting_for_human: false,
+          waiting_for_agent: true,
+          rejection_count: 0,
+          latest_event_summary: 'Waiting for next idle reviewer agent',
+        }}
+        selected={false}
+        onClick={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Waiting for agent')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for next idle reviewer agent')).toBeInTheDocument()
   })
 })

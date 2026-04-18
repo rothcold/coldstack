@@ -87,7 +87,51 @@ pub fn workflow_hint(status: WorkflowStatus) -> Option<String> {
     }
 }
 
-pub fn current_action_label(status: WorkflowStatus) -> String {
+pub fn workflow_role_for_status(status: WorkflowStatus) -> Option<WorkflowRole> {
+    match status {
+        WorkflowStatus::Plan => Some(WorkflowRole::Planner),
+        WorkflowStatus::Design => Some(WorkflowRole::Designer),
+        WorkflowStatus::Coding => Some(WorkflowRole::Coder),
+        WorkflowStatus::Review => Some(WorkflowRole::Reviewer),
+        WorkflowStatus::QA => Some(WorkflowRole::Qa),
+        WorkflowStatus::NeedsHuman | WorkflowStatus::Done => None,
+    }
+}
+
+pub fn next_workflow_status(status: WorkflowStatus) -> Option<WorkflowStatus> {
+    match status {
+        WorkflowStatus::Plan => Some(WorkflowStatus::Design),
+        WorkflowStatus::Design => Some(WorkflowStatus::Coding),
+        WorkflowStatus::Coding => Some(WorkflowStatus::Review),
+        WorkflowStatus::Review => Some(WorkflowStatus::QA),
+        WorkflowStatus::QA => Some(WorkflowStatus::NeedsHuman),
+        WorkflowStatus::NeedsHuman => Some(WorkflowStatus::Done),
+        WorkflowStatus::Done => None,
+    }
+}
+
+fn waiting_agent_label(status: WorkflowStatus) -> Option<&'static str> {
+    match workflow_role_for_status(status) {
+        Some(WorkflowRole::Planner) => Some("planner"),
+        Some(WorkflowRole::Designer) => Some("designer"),
+        Some(WorkflowRole::Coder) => Some("coder"),
+        Some(WorkflowRole::Reviewer) => Some("reviewer"),
+        Some(WorkflowRole::Qa) => Some("qa"),
+        Some(WorkflowRole::Human) | None => None,
+    }
+}
+
+pub fn waiting_for_agent_hint(status: WorkflowStatus) -> Option<String> {
+    waiting_agent_label(status).map(|role| format!("Waiting for the next idle {} agent.", role))
+}
+
+pub fn current_action_label(status: WorkflowStatus, waiting_for_agent: bool) -> String {
+    if waiting_for_agent {
+        return waiting_agent_label(status)
+            .map(|role| format!("Waiting for {} assignment", role))
+            .unwrap_or_else(|| "Waiting for assignment".to_string());
+    }
+
     match status {
         WorkflowStatus::Plan => "Planning in progress".to_string(),
         WorkflowStatus::Design => "Design in progress".to_string(),
@@ -215,19 +259,22 @@ fn validate_actor(
 
 pub fn load_task(conn: &Connection, id: i64) -> Result<Task, AppError> {
     conn.query_row(
-        "SELECT id, task_id, title, description, archived, status, assignee, created_at FROM tasks WHERE id = ?1",
+        "SELECT id, task_id, title, description, source, source_branch, branch_name, archived, status, assignee, created_at FROM tasks WHERE id = ?1",
         params![id],
         |row| {
-            let status_str: String = row.get(5)?;
+            let status_str: String = row.get(8)?;
             Ok(Task {
                 id: row.get(0)?,
                 task_id: row.get(1)?,
                 title: row.get(2)?,
                 description: row.get(3)?,
-                archived: row.get::<_, i32>(4)? == 1,
+                source: row.get(4)?,
+                source_branch: row.get(5)?,
+                branch_name: row.get(6)?,
+                archived: row.get::<_, i32>(7)? == 1,
                 status: WorkflowStatus::from_str(&status_str),
-                assignee: row.get(6)?,
-                created_at: row.get(7)?,
+                assignee: row.get(9)?,
+                created_at: row.get(10)?,
                 subtasks: Vec::new(),
             })
         },
@@ -273,6 +320,14 @@ pub fn load_workflow_events(
 
 pub fn load_task_detail(conn: &Connection, task_id: i64) -> Result<TaskDetail, AppError> {
     let mut task = load_task(conn, task_id)?;
+    let waiting_for_agent = conn
+        .query_row(
+            "SELECT auto_handoff_pending FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get::<_, i32>(0),
+        )
+        .map(|value| value == 1)
+        .map_err(AppError::Db)?;
 
     let mut stmt = conn.prepare(
         "SELECT id, task_id, title, completed, status, assignee FROM subtasks WHERE task_id = ?1",
@@ -293,8 +348,13 @@ pub fn load_task_detail(conn: &Connection, task_id: i64) -> Result<TaskDetail, A
     task.subtasks = subtasks;
 
     Ok(TaskDetail {
-        current_action_label: current_action_label(task.status),
-        current_action_hint: workflow_hint(task.status),
+        current_action_label: current_action_label(task.status, waiting_for_agent),
+        current_action_hint: if waiting_for_agent {
+            waiting_for_agent_hint(task.status)
+        } else {
+            workflow_hint(task.status)
+        },
+        waiting_for_agent,
         events: load_workflow_events(conn, task_id)?,
         task,
     })
