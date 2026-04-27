@@ -8,7 +8,7 @@ use crate::errors::AppError;
 use crate::models::*;
 use crate::workflow::{compose_employee_prompt, infer_workflow_role, normalize_custom_prompt};
 
-const SUPPORTED_AGENT_BACKENDS: &[&str] = &["claude_code"];
+pub(crate) const SUPPORTED_AGENT_BACKENDS: &[&str] = &["claude_code", "gemini", "codex", "opencode"];
 
 fn validate_agent_backend(backend: &str) -> Result<(), AppError> {
     if SUPPORTED_AGENT_BACKENDS.contains(&backend) {

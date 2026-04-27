@@ -156,7 +156,7 @@ server.tool(
   "Register a new agent",
   {
     name: z.string().describe("Unique agent name, used as assignee in tasks"),
-    cli: z.enum(["claude", "gemini"]).describe("CLI backend to use"),
+    cli: z.enum(["claude", "gemini", "codex", "opencode"]).describe("CLI backend to use"),
     system_prompt: z.string().optional().describe("Custom role/system prompt for this agent"),
     work_dir: z.string().optional().describe("Working directory for the agent"),
     model: z.string().optional().nullable().describe("Model override"),
@@ -177,7 +177,7 @@ server.tool(
   {
     id: z.number().describe("Internal database ID of the agent"),
     name: z.string().optional(),
-    cli: z.enum(["claude", "gemini"]).optional(),
+    cli: z.enum(["claude", "gemini", "codex", "opencode"]).optional(),
     system_prompt: z.string().optional(),
     work_dir: z.string().optional(),
     model: z.string().optional().nullable(),
