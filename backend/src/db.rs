@@ -260,7 +260,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     conn.execute(
-        "UPDATE ai_employees SET agent_backend = 'claude_code' WHERE agent_backend IS NULL OR agent_backend = '' OR agent_backend NOT IN ('claude_code')",
+        "UPDATE ai_employees SET agent_backend = 'claude_code' WHERE agent_backend IS NULL OR agent_backend = '' OR agent_backend NOT IN ('claude_code', 'gemini', 'codex', 'opencode')",
         [],
     )?;
     conn.execute(
@@ -380,6 +380,7 @@ fn is_our_process(pid: u32) -> bool {
             return contents.contains("claude")
                 || contents.contains("gemini")
                 || contents.contains("codex")
+                || contents.contains("opencode")
                 || contents.contains("cursor");
         }
     }

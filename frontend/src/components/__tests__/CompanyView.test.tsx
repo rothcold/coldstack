@@ -210,3 +210,29 @@ describe('CompanyView additional instructions', () => {
     })
   })
 })
+
+describe('CompanyView agent backend dropdown', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('shows all supported backends in the create-agent form', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/employees' && !init) {
+        return Promise.resolve({ ok: true, json: async () => [] })
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    }) as unknown as typeof fetch)
+
+    render(<CompanyView />)
+    fireEvent.click(await screen.findByRole('button', { name: '+ New Agent' }))
+
+    const select = screen.getByLabelText('Agent Backend') as HTMLSelectElement
+    const options = Array.from(select.options).map(o => o.value)
+    expect(options).toContain('claude_code')
+    expect(options).toContain('gemini')
+    expect(options).toContain('codex')
+    expect(options).toContain('opencode')
+  })
+})

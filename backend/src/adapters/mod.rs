@@ -1,9 +1,27 @@
 pub mod claude_code;
+pub mod codex;
+pub mod gemini;
+pub mod opencode;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::io::BufReader;
 use tokio::process::Child;
+
+pub fn find_binary(names: &[&str]) -> Option<String> {
+    for name in names {
+        if std::process::Command::new("which")
+            .arg(name)
+            .output()
+            .ok()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
 
 pub struct TaskInfo {
     pub title: String,
@@ -45,9 +63,19 @@ impl AdapterRegistry {
         };
         let claude = claude_code::ClaudeCodeAdapter;
         if claude.is_available() {
-            registry
-                .adapters
-                .insert("claude_code".to_string(), Box::new(claude));
+            registry.adapters.insert("claude_code".to_string(), Box::new(claude));
+        }
+        let gem = gemini::GeminiAdapter;
+        if gem.is_available() {
+            registry.adapters.insert("gemini".to_string(), Box::new(gem));
+        }
+        let cdx = codex::CodexAdapter;
+        if cdx.is_available() {
+            registry.adapters.insert("codex".to_string(), Box::new(cdx));
+        }
+        let oc = opencode::OpenCodeAdapter;
+        if oc.is_available() {
+            registry.adapters.insert("opencode".to_string(), Box::new(oc));
         }
         registry
     }

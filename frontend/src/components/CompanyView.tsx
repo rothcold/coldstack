@@ -259,14 +259,22 @@ export default function CompanyView() {
                 required
               />
             </Field>
-            <Field label="Agent Backend">
-              <select
-                value={form.agent_backend}
-                onChange={e => setForm({ ...form, agent_backend: e.target.value })}
-              >
-                <option value="claude_code">claude_code</option>
-              </select>
-            </Field>
+            <div>
+              <Field label="Agent Backend">
+                <select
+                  value={form.agent_backend}
+                  onChange={e => setForm({ ...form, agent_backend: e.target.value })}
+                >
+                  <option value="claude_code">Claude Code</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="codex">Codex</option>
+                  <option value="opencode">OpenCode</option>
+                </select>
+              </Field>
+              <small style={{ color: 'var(--text-muted, #888)', marginTop: '0.25rem', display: 'block', fontSize: '0.75rem' }}>
+                The selected CLI must be installed on the server to execute tasks.
+              </small>
+            </div>
           </div>
           <Field label="Additional Instructions">
             <textarea

@@ -93,7 +93,6 @@ coldstack/
 ├── frontend/             # React SPA (coldstack-web)
 │   └── src/App.tsx
 ├── mcp/                  # MCP server exposing the Coldstack API
-├── agent/                # Polling runner that drives CLIs
 ├── build_and_package.sh  # Frontend → backend → release/coldstack
 ├── Dockerfile
 └── docker-compose.yml
